@@ -85,24 +85,55 @@
   <input type="file" id="patternFile" accept=".svg,image/svg+xml" hidden>
 </main>
 
+<script src="default-image.js"></script>
 <script id="fs" type="x-shader/x-fragment">
 precision highp float;
 varying vec2 vUv;
 uniform sampler2D uTex;  // the user's image
 uniform sampler2D uMap;  // pattern map: R = pane id, GB = pane centre, A = palette slot
-uniform vec2 uRes, uFit; // uFit: canvas uv -> pattern uv scale
-uniform float uSeed, uDisp, uZoomVar, uRot, uZoom, uEdge, uGrain, uTint, uMono, uColor;
-uniform vec3 uPal[6];
 uniform float uAspect;
+uniform vec2 uRes, uFit; // uFit: canvas uv -> pattern uv scale
+uniform float uSeed, uDisp, uZoomVar, uRot, uZoom, uEdge, uGrain, uTint, uMono, uColor, uWarp, uWarpFreq, uShift, uShiftK;
+uniform vec3 uPal[6];
 
 float h1(float n) { return fract(sin(n * 12.9898 + uSeed * 7.233) * 43758.5453); }
-vec4 pane(vec2 uv) { return texture2D(uMap, (uv - 0.5) * uFit + 0.5); }
+float vhash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+float vnoise(vec2 p) { // smooth value noise, 0..1
+  vec2 i = floor(p), f = fract(p);
+  f = f * f * (3.0 - 2.0 * f);
+  return mix(mix(vhash(i), vhash(i + vec2(1.0, 0.0)), f.x), mix(vhash(i + vec2(0.0, 1.0)), vhash(i + vec2(1.0, 1.0)), f.x), f.y);
+}
+// bend the pattern itself: push every lookup along a smooth noise field
+vec2 warp(vec2 uv) {
+  if (uWarp <= 0.0) return uv;
+  vec2 q = uv * vec2(uAspect, 1.0) * uWarpFreq + uSeed * 1.7;
+  vec2 n = vec2(vnoise(q), vnoise(q + 37.3)) + 0.5 * vec2(vnoise(q * 2.1 + 11.0), vnoise(q * 2.1 + 71.0));
+  return uv + (n / 1.5 - 0.5) * 2.0 * uWarp * vec2(1.0 / uAspect, 1.0);
+}
+// Size shift: re-space the pattern along x and along y separately. Some columns/rows of panes
+// grow while their neighbours shrink; straight edges stay straight and the pattern still fills the frame.
+float shift1(float x, float ph) {
+  float a = 6.2831853 * uShiftK;
+  return x + uShift * 0.45 / a * (sin(a * x + ph) - sin(ph) + 0.5 * (sin(2.0 * a * x + ph * 1.7) - sin(ph * 1.7)));
+}
+float unshift1(float y, float ph) { // inverse of shift1 (Newton steps; the slope is always > 0)
+  float a = 6.2831853 * uShiftK, x = y;
+  for (int i = 0; i < 5; i++)
+    x -= (shift1(x, ph) - y) / (1.0 + uShift * 0.45 * (cos(a * x + ph) + cos(2.0 * a * x + ph * 1.7)));
+  return x;
+}
+vec2 shiftPhase() { return vec2(uSeed * 3.1, uSeed * 5.3 + 2.0); }
+vec4 pane(vec2 uv) {
+  vec2 p = (warp(uv) - 0.5) * uFit + 0.5, ph = shiftPhase();
+  return texture2D(uMap, vec2(shift1(p.x, ph.x), shift1(p.y, ph.y)));
+}
 float paneId(vec2 uv) { return floor(pane(uv).r * 255.0 + 0.5); }
 
 void main() {
   vec4 m = pane(vUv);
   float id = floor(m.r * 255.0 + 0.5) * 7.31;
-  vec2 c = (m.gb - 0.5) / uFit + 0.5;
+  vec2 ph = shiftPhase();
+  vec2 c = (vec2(unshift1(m.g, ph.x), unshift1(m.b, ph.y)) - 0.5) / uFit + 0.5;
 
   // each pane refracts the image with its own shift, magnification and twist
   vec2 off = (vec2(h1(id + 1.0), h1(id + 2.0)) - 0.5) * uDisp * vec2(1.0, 0.6);
@@ -238,8 +269,9 @@ const PATTERN = (() => {
 })();
 
 // Rasterise the pattern into an RGBA map (R = id, G/B = pane centre, A = palette slot).
-function buildPatternMap() {
-  const W = 2048, H = Math.round(W * BOUNDS.h / BOUNDS.w);
+function buildPatternMap(opts = {}) {
+  const W = opts.W || 2048, H = Math.round(W * BOUNDS.h / BOUNDS.w);
+  const T = opts.shift ? shiftAxes(opts.shift, BOUNDS.x, BOUNDS.y, BOUNDS.w, BOUNDS.h) : null;
   const cv = document.createElement('canvas');
   cv.width = W; cv.height = H;
   const ctx = cv.getContext('2d', { willReadFrequently: true });
@@ -251,7 +283,10 @@ function buildPatternMap() {
     ctx.fillStyle = `rgb(${rgb})`;
     for (const part of shape.parts) {
       ctx.save();
-      for (const [kind, ...a] of part) {
+      for (let [kind, ...a] of part) {
+        if (T) a = kind === 'r' ? [T.X(a[0]), T.Y(a[1]), T.X(a[2]), T.Y(a[3])]
+          : kind === 'p' ? [a[0].map((v, k) => k % 2 ? T.Y(v) : T.X(v))]
+          : [T.X(a[0]), T.Y(a[1]), shiftRadius(T, a[0], a[1], a[2])];
         const p = new Path2D();
         if (kind === 'r') p.rect(a[0], a[1], a[2] - a[0], a[3] - a[1]);
         else if (kind === 'p') { const q = a[0]; p.moveTo(q[0], q[1]); for (let k = 2; k < q.length; k += 2) p.lineTo(q[k], q[k + 1]); p.closePath(); }
@@ -266,7 +301,7 @@ function buildPatternMap() {
   const src = ctx.getImageData(0, 0, W, H).data, ids = new Uint8Array(W * H);
   for (let y = 0, i = 0; y < H; y++) for (let x = 0; x < W; x++, i++)
     ids[i] = keyToId.get(src[i * 4] << 16 | src[i * 4 + 1] << 8 | src[i * 4 + 2]) || (x ? ids[i - 1] : y ? ids[i - W] : 1);
-  return packMap(ids, W, H, PATTERN.length, id => PATTERN[id - 1].slot);
+  return Object.assign(packMap(ids, W, H, PATTERN.length, id => PATTERN[id - 1].slot), { shifted: !!T });
 }
 
 // ids (1..count per pixel, top-down rows) -> RGBA map texture data
@@ -290,13 +325,107 @@ function packMap(ids, W, H, count, slotOf) {
 }
 
 // =====================================================================================
-// Designer patterns: any SVG works. We ignore fills and colours and look only at the
-// LINES — every outline is drawn as a thin stroke, and each closed region between the
-// lines becomes one pane. So a pattern can be a single <path> of crack lines, or a
-// drawing made of many shapes; both give the same result.
+// Size shift: re-space a pattern along x and along y so some panes grow while their
+// neighbours shrink. It is applied to the pattern's GEOMETRY, not its pixels: rectangle
+// edges move, circles get a new centre and radius — so rectangles stay rectangles and
+// circles stay circles.
+// =====================================================================================
+function shiftFn(s, ph) { // monotonic remap of 0..1 onto 0..1
+  const a = 2 * Math.PI * s.k;
+  return u => u + s.amount * 0.45 / a * (Math.sin(a * u + ph) - Math.sin(ph) + 0.5 * (Math.sin(2 * a * u + ph * 1.7) - Math.sin(ph * 1.7)));
+}
+function shiftAxes(s, x0, y0, w, h) {
+  const fx = shiftFn(s, s.phx), fy = shiftFn(s, s.phy);
+  return { X: x => x0 + w * fx((x - x0) / w), Y: y => y0 + h * fy((y - y0) / h) };
+}
+// radius of a circle after the shift: half the average of its shifted width and height
+const shiftRadius = (T, cx, cy, r) => (T.X(cx + r) - T.X(cx - r) + T.Y(cy + r) - T.Y(cy - r)) / 4;
+
+// Path data -> shifted path data. Points are moved; circular arcs stay circular (same sweep angle).
+function shiftPathData(d, T, eps) {
+  const numRe = /[-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][-+]?\d+)?/y;
+  let i = 0, cmd = '', cx = 0, cy = 0, sx = 0, sy = 0, cur = null;
+  const ws = () => { while (i < d.length && (d[i] === ',' || d.charCodeAt(i) <= 32)) i++; };
+  const n = () => { ws(); numRe.lastIndex = i; const m = numRe.exec(d); if (!m) throw new Error('bad path'); i = numRe.lastIndex; return +m[0]; };
+  const flag = () => { ws(); return d[i++] === '1' ? 1 : 0; };
+  const subs = [];
+  for (;;) {
+    ws(); if (i >= d.length) break;
+    if (/[a-zA-Z]/.test(d[i])) cmd = d[i++];
+    else if (cmd === 'M') cmd = 'L'; else if (cmd === 'm') cmd = 'l';
+    else if (!cmd || cmd === 'Z' || cmd === 'z') throw new Error('bad path');
+    const C = cmd.toUpperCase(), ox = cmd !== C ? cx : 0, oy = cmd !== C ? cy : 0;
+    if (C === 'Z') { if (cur) cur.closed = true; cx = sx; cy = sy; continue; }
+    if (C === 'M') { cx = sx = n() + ox; cy = sy = n() + oy; cur = { start: [T.X(cx), T.Y(cy)], segs: [], closed: false }; subs.push(cur); continue; }
+    if (!cur) throw new Error('bad path');
+    let x, y, k = C, a = [];
+    const pair = () => { const px = n() + ox, py = n() + oy; a.push(T.X(px), T.Y(py)); };
+    if (C === 'L' || C === 'T') { x = n() + ox; y = n() + oy; }
+    else if (C === 'H') { x = n() + ox; y = cy; k = 'L'; }
+    else if (C === 'V') { y = n() + oy; x = cx; k = 'L'; }
+    else if (C === 'C') { pair(); pair(); x = n() + ox; y = n() + oy; }
+    else if (C === 'S' || C === 'Q') { pair(); x = n() + ox; y = n() + oy; }
+    else if (C === 'A') {
+      const rx = Math.abs(n()), ry = Math.abs(n()), rot = n(), la = flag(), sw = flag();
+      x = n() + ox; y = n() + oy;
+      const chord = Math.hypot(x - cx, y - cy), chord2 = Math.hypot(T.X(x) - T.X(cx), T.Y(y) - T.Y(cy));
+      if (Math.abs(rx - ry) <= 1e-6 * Math.max(1, rx) && chord > 0) { const r = rx * chord2 / chord; a = [r, r, 0, la, sw]; }
+      else { const mx = (x + cx) / 2, my = (y + cy) / 2; a = [(T.X(mx + rx) - T.X(mx - rx)) / 2, (T.Y(my + ry) - T.Y(my - ry)) / 2, rot, la, sw]; }
+    } else throw new Error('bad path');
+    cur.segs.push({ k, a, end: [T.X(x), T.Y(y)] });
+    cx = x; cy = y;
+  }
+  const f = v => +v.toFixed(2);
+  return subs.map(sub => {
+    const g = sub.segs, last = g[g.length - 1];
+    if (eps > 0 && !sub.closed && g.length) { // let loose line ends overshoot a little so they still reach the line they met
+      const push = (p, from) => { const l = Math.hypot(p[0] - from[0], p[1] - from[1]); if (l > 0) { p[0] += (p[0] - from[0]) / l * eps; p[1] += (p[1] - from[1]) / l * eps; } };
+      const s0 = sub.start.slice(), before = g.length > 1 ? g[g.length - 2].end.slice() : s0;
+      if (g[0].k === 'L') push(sub.start, g[0].end.slice());
+      if (last.k === 'L') push(last.end, before);
+    }
+    return 'M' + sub.start.map(f) + g.map(s => s.k + [...s.a, ...s.end].map(f)).join('') + (sub.closed ? 'Z' : '');
+  }).join('');
+}
+
+// Shift every shape of an SVG in place. Returns false (and changes nothing) if the file uses features we can't shift.
+function shiftSvgGeometry(svg, els, vb, s, eps) {
+  if (svg.querySelector('[transform], use')) return false;
+  const T = shiftAxes(s, vb[0], vb[1], vb[2], vb[3]), todo = [];
+  const num = (el, a) => parseFloat(el.getAttribute(a)) || 0;
+  try {
+    for (const el of els) {
+      const t = el.localName;
+      if (t === 'path') todo.push([el, { d: shiftPathData(el.getAttribute('d') || '', T, eps) }]);
+      else if (t === 'rect') { const x = num(el, 'x'), y = num(el, 'y'); todo.push([el, { x: T.X(x), y: T.Y(y), width: T.X(x + num(el, 'width')) - T.X(x), height: T.Y(y + num(el, 'height')) - T.Y(y) }]); }
+      else if (t === 'circle') { const x = num(el, 'cx'), y = num(el, 'cy'); todo.push([el, { cx: T.X(x), cy: T.Y(y), r: shiftRadius(T, x, y, num(el, 'r')) }]); }
+      else if (t === 'ellipse') { const x = num(el, 'cx'), y = num(el, 'cy'), rx = num(el, 'rx'), ry = num(el, 'ry'); todo.push([el, { cx: T.X(x), cy: T.Y(y), rx: (T.X(x + rx) - T.X(x - rx)) / 2, ry: (T.Y(y + ry) - T.Y(y - ry)) / 2 }]); }
+      else if (t === 'line') todo.push([el, { x1: T.X(num(el, 'x1')), y1: T.Y(num(el, 'y1')), x2: T.X(num(el, 'x2')), y2: T.Y(num(el, 'y2')) }]);
+      else { const q = (el.getAttribute('points') || '').trim().split(/[\s,]+/).map(Number); if (q.some(isNaN)) return false; todo.push([el, { points: q.map((v, k) => k % 2 ? T.Y(v) : T.X(v)).join(' ') }]); }
+    }
+  } catch (e) { return false; }
+  for (const [el, attrs] of todo) for (const k in attrs) el.setAttribute(k, attrs[k]);
+  return true;
+}
+
+// =====================================================================================
+// Designer patterns: any SVG works, read in one of two ways.
+//  · Filled artwork (shapes with fills, stacked on top of each other): each visible piece
+//    of each shape is a pane, exactly as the drawing looks. Shapes that share a fill share
+//    a palette slot. Unfilled strokes drawn on top act as extra cracks.
+//  · Line drawing (nothing is filled — e.g. ONE path of crack lines): every closed region
+//    between the lines is a pane.
 // =====================================================================================
 const MAX_PANES = 255, MIN_PANE_AREA = 60;
-async function buildSvgPatternMap(text) {
+const GEOMETRY = 'path,rect,circle,ellipse,line,polygon,polyline';
+function fillOf(el) { // nearest fill on the element or its ancestors; SVG's default is black
+  for (let e = el; e && e.nodeType === 1; e = e.parentNode) {
+    const f = (e.style && e.style.fill) || e.getAttribute('fill');
+    if (f) return f.trim();
+  }
+  return 'black';
+}
+async function buildSvgPatternMap(text, opts = {}) {
   const doc = new DOMParser().parseFromString(text, 'image/svg+xml');
   const svg = doc.documentElement;
   if (svg.nodeName !== 'svg' || doc.querySelector('parsererror')) throw new Error('Not a valid SVG file');
@@ -306,13 +435,28 @@ async function buildSvgPatternMap(text) {
     if (!(vb[2] > 0 && vb[3] > 0)) throw new Error('SVG needs a viewBox (or width and height)');
     svg.setAttribute('viewBox', vb.join(' '));
   }
-  const W = 2048, H = Math.max(64, Math.min(4096, Math.round(W * vb[3] / vb[2])));
+  const W = opts.W || 2048, H = Math.max(64, Math.min(4096, Math.round(W * vb[3] / vb[2])));
+  const els = [...svg.querySelectorAll(GEOMETRY)].filter(e => !e.closest('defs,clipPath,mask,pattern,symbol,marker'));
+  const fills = els.map(fillOf), fillMode = fills.some(f => f !== 'none');
+  const shifted = !!opts.shift && shiftSvgGeometry(svg, els, vb, opts.shift, fillMode ? 0 : 0.012 * Math.max(vb[2], vb[3]) * opts.shift.amount);
+
+  // restyle: flat unique colour per filled shape (or thin black strokes), nothing else
+  const stroke = `fill:none!important;stroke:#000!important;stroke-width:${Math.max(1.5, 2.5 * W / 2048)}px!important;stroke-opacity:1!important;stroke-dasharray:none!important;vector-effect:non-scaling-stroke!important`;
+  const keyToClass = new Map([[0xffffff, 0]]), classSlot = [0], slotOfFill = new Map();
+  els.forEach((el, i) => {
+    if (!fillMode || fills[i] === 'none') { el.setAttribute('style', stroke); return; }
+    const rgb = [(i * 53 + 7) % 251, (i * 37 + 11) % 256, (i * 91 + 53) % 256];
+    keyToClass.set(rgb[0] << 16 | rgb[1] << 8 | rgb[2], classSlot.length);
+    if (!slotOfFill.has(fills[i])) slotOfFill.set(fills[i], slotOfFill.size % 6);
+    classSlot.push(slotOfFill.get(fills[i]));
+    el.setAttribute('style', `fill:rgb(${rgb})!important;fill-opacity:1!important;stroke:none!important`);
+  });
   svg.setAttribute('width', W); svg.setAttribute('height', H);
   svg.setAttribute('preserveAspectRatio', 'none');
+  if (fillMode) svg.setAttribute('shape-rendering', 'crispEdges');
   const style = doc.createElementNS('http://www.w3.org/2000/svg', 'style');
-  style.textContent = '*{fill:none!important;stroke:#000!important;stroke-width:2.5px!important;stroke-opacity:1!important;' +
-    'opacity:1!important;stroke-dasharray:none!important;filter:none!important;mask:none!important;clip-path:none!important;' +
-    'vector-effect:non-scaling-stroke!important;visibility:visible!important}';
+  style.textContent = '*{opacity:1!important;filter:none!important;mask:none!important;clip-path:none!important;visibility:visible!important}' +
+    'text,image,foreignObject{display:none!important}';
   svg.append(style);
   const url = URL.createObjectURL(new Blob([new XMLSerializer().serializeToString(svg)], { type: 'image/svg+xml' }));
   const img = new Image();
@@ -326,27 +470,33 @@ async function buildSvgPatternMap(text) {
   ctx.drawImage(img, 0, 0, W, H);
   const px = ctx.getImageData(0, 0, W, H).data, N = W * H;
 
-  // label connected regions between the lines (flood fill, 4-connected)
-  const label = new Int32Array(N), stack = new Int32Array(N), areas = [0];
-  for (let i = 0; i < N; i++) if (px[i * 4] < 150) label[i] = -1; // on a line
+  // class per pixel: which shape it shows (fill mode) or just "not a line"; -1 = line / blended edge pixel
+  const cls = new Int16Array(N);
+  for (let i = 0; i < N; i++) {
+    if (fillMode) { const c = keyToClass.get(px[i * 4] << 16 | px[i * 4 + 1] << 8 | px[i * 4 + 2]); cls[i] = c === undefined ? -1 : c; }
+    else cls[i] = px[i * 4] < 150 ? -1 : 0;
+  }
+  // label connected regions of the same class (flood fill, 4-connected)
+  const label = new Int32Array(N), stack = new Int32Array(N), areas = [0], regionClass = [0];
   for (let start = 0; start < N; start++) {
-    if (label[start] !== 0) continue;
-    const id = areas.length; let top = 0, area = 0;
+    if (label[start] !== 0 || cls[start] < 0) continue;
+    const id = areas.length, c = cls[start]; let top = 0, area = 0;
     stack[top++] = start; label[start] = id;
     while (top) {
       const i = stack[--top], x = i % W; area++;
-      if (x > 0 && label[i - 1] === 0) { label[i - 1] = id; stack[top++] = i - 1; }
-      if (x < W - 1 && label[i + 1] === 0) { label[i + 1] = id; stack[top++] = i + 1; }
-      if (i >= W && label[i - W] === 0) { label[i - W] = id; stack[top++] = i - W; }
-      if (i < N - W && label[i + W] === 0) { label[i + W] = id; stack[top++] = i + W; }
+      if (x > 0 && label[i - 1] === 0 && cls[i - 1] === c) { label[i - 1] = id; stack[top++] = i - 1; }
+      if (x < W - 1 && label[i + 1] === 0 && cls[i + 1] === c) { label[i + 1] = id; stack[top++] = i + 1; }
+      if (i >= W && label[i - W] === 0 && cls[i - W] === c) { label[i - W] = id; stack[top++] = i - W; }
+      if (i < N - W && label[i + W] === 0 && cls[i + W] === c) { label[i + W] = id; stack[top++] = i + W; }
     }
-    areas.push(area);
+    areas.push(area); regionClass.push(c);
   }
   // keep the biggest regions (ids must fit in a byte); specks are absorbed by their neighbours
-  const keep = areas.map((a, id) => [a, id]).slice(1).filter(e => e[0] >= MIN_PANE_AREA).sort((p, q) => q[0] - p[0]).slice(0, MAX_PANES);
-  if (keep.length < 2) throw new Error('No closed regions found — the lines need to enclose areas');
-  const remap = new Int32Array(areas.length);
-  keep.forEach(([, id], k) => { remap[id] = k + 1; });
+  const minArea = MIN_PANE_AREA * (W / 2048) ** 2;
+  const keep = areas.map((a, id) => [a, id]).slice(1).filter(e => e[0] >= minArea).sort((p, q) => q[0] - p[0]).slice(0, MAX_PANES);
+  if (keep.length < 2) throw new Error('No separate regions found — the shapes or lines need to enclose areas');
+  const remap = new Int32Array(areas.length), slots = [0];
+  keep.forEach(([, id], k) => { remap[id] = k + 1; slots.push(fillMode ? classSlot[regionClass[id]] : ((k + 1) * 5 + 2) % 6); });
   const ids = new Uint8Array(N), queue = stack; let qh = 0, qt = 0;
   for (let i = 0; i < N; i++) { const l = label[i] > 0 ? remap[label[i]] : 0; ids[i] = l; if (l) queue[qt++] = i; }
   // grow panes over the line pixels (and dropped specks) so every pixel has an owner
@@ -357,16 +507,22 @@ async function buildSvgPatternMap(text) {
     if (i >= W && !ids[i - W]) { ids[i - W] = id; queue[qt++] = i - W; }
     if (i < N - W && !ids[i + W]) { ids[i + W] = id; queue[qt++] = i + W; }
   }
-  return packMap(ids, W, H, keep.length, id => (id * 5 + 2) % 6);
+  return Object.assign(packMap(ids, W, H, keep.length, id => slots[id]), { shifted });
 }
 
-// Patterns shipped with the page, embedded so they work even when the page is opened as a local file.
-// To add one: give it a name, the SVG's viewBox, and ONE path of crack lines (the "d" attribute).
+// Patterns shipped with the page (copies of the files in patterns/), embedded so they work even when the
+// page is opened as a local file. To add one: paste the designer's SVG markup as a new entry.
 const PATTERN_LIBRARY = [
-  { name: 'Portrait 4:5', viewBox: '0 0 1024 1280',
-    d: 'M0,0H1024V1280H0Z M0,120H1024 M270,0V520 M660,0V120 M540,120V1280 M790,0V1280 M0,520H540 M0,600H540 M0,930H540 M540,860H1024 M720,452A320,320 0 1 0 80,452A320,320 0 1 0 720,452Z M1110,470A250,250 0 1 0 610,470A250,250 0 1 0 1110,470Z M790,178.3A300,300 0 0 1 1024,219 M1024,721A300,300 0 0 1 790,761.7 M540,400L709.1,369.2 M0,600A165,165 0 0 1 0,930 M0,864.3A420,420 0 0 1 480,1280 M590,860A200,200 0 0 0 790,1060 M540,1130L680,1280 M790,940H1024 M790,1010H1024 M790,1080H1024 M790,1150H1024' },
-  { name: 'Facets', viewBox: '0 0 1200 900',
-    d: 'M0,0H1200V900H0Z M0,250L420,0 M420,0L700,900 M0,250L560,450 M560,450L1200,180 M560,450L250,900 M0,620L405,675 M700,900L1200,560 M850,327L960,724 M620,0L770,360 M1200,180L900,0 M110,900L170,643 M330,128A190,190 0 0 1 475,398 M960,724A260,260 0 0 0 1200,400' },
+  { name: 'Portrait 4:5',
+    svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1280"><path fill="none" stroke="#000" stroke-width="2" d="M0,0H1024V1280H0Z M0,120H1024 M270,0V520 M660,0V120 M540,120V1280 M790,0V1280 M0,520H540 M0,600H540 M0,930H540 M540,860H1024 M720,452A320,320 0 1 0 80,452A320,320 0 1 0 720,452Z M1110,470A250,250 0 1 0 610,470A250,250 0 1 0 1110,470Z M790,178.3A300,300 0 0 1 1024,219 M1024,721A300,300 0 0 1 790,761.7 M540,400L709.1,369.2 M0,600A165,165 0 0 1 0,930 M0,864.3A420,420 0 0 1 480,1280 M590,860A200,200 0 0 0 790,1060 M540,1130L680,1280 M790,940H1024 M790,1010H1024 M790,1080H1024 M790,1150H1024"/></svg>' },
+  { name: 'Facets',
+    svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 900"><path fill="none" stroke="#000" stroke-width="2" d="M0,0H1200V900H0Z M0,250L420,0 M420,0L700,900 M0,250L560,450 M560,450L1200,180 M560,450L250,900 M0,620L405,675 M700,900L1200,560 M850,327L960,724 M620,0L770,360 M1200,180L900,0 M110,900L170,643 M330,128A190,190 0 0 1 475,398 M960,724A260,260 0 0 0 1200,400"/></svg>' },
+  { name: 'Pattern 1',
+    svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900"><rect fill="url(#g0)" height="900" width="1600" x="0" y="0"/><rect fill="url(#g3)" height="900" width="240" x="120" y="0"/><rect fill="url(#g0)" height="900" width="420" x="360" y="0"/><rect fill="url(#g2)" height="900" width="380" x="780" y="0"/><rect fill="url(#g0)" height="900" width="440" x="1160" y="0"/><rect fill="url(#g4)" height="100" width="360" x="0" y="110"/><rect fill="url(#g3)" height="255" width="360" x="0" y="210"/><rect fill="url(#g1)" height="65" width="360" x="0" y="465"/><rect fill="url(#g0)" height="270" width="360" x="0" y="530"/><rect fill="url(#g2)" height="100" width="360" x="0" y="800"/><rect fill="url(#g1)" height="645" width="125" x="120" y="155"/><rect fill="url(#g4)" height="645" width="115" x="245" y="155"/><rect fill="url(#g3)" height="430" width="420" x="360" y="320"/><rect fill="url(#g2)" height="55" width="420" x="360" y="750"/><path d="M360 0 H780 A420 420 0 0 1 360 420 Z" fill="url(#g1)"/><path d="M360 0 H780 V610 A610 610 0 0 1 360 0 Z" fill="url(#g2)"/><rect fill="url(#g0)" height="205" width="380" x="780" y="0"/><path d="M780 0 H1080 A300 300 0 0 1 780 300 Z" fill="url(#g6)"/><rect fill="url(#g2)" height="125" width="380" x="780" y="205"/><rect fill="url(#g0)" height="135" width="380" x="780" y="330"/><path d="M1160 330 A240 240 0 0 0 920 570 V800 A240 240 0 0 0 1160 560 Z" fill="url(#g4)"/><rect fill="url(#g5)" height="435" width="180" x="780" y="465"/><rect fill="url(#g3)" height="100" width="200" x="960" y="800"/><rect fill="url(#g2)" height="200" width="440" x="1160" y="0"/><rect fill="url(#g0)" height="110" width="440" x="1160" y="200"/><path d="M1160 310 H1600 V470 A440 440 0 0 1 1160 310 Z" fill="url(#g1)"/><rect fill="url(#g3)" height="80" width="440" x="1160" y="470"/><rect fill="url(#g0)" height="260" width="440" x="1160" y="550"/><path d="M1160 900 V680 A220 220 0 0 1 1380 900 Z" fill="url(#g1)"/><rect fill="url(#g3)" height="90" width="220" x="1380" y="810"/></svg>' },
+  { name: 'Pattern 2',
+    svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900"><rect fill="url(#g0)" height="900" width="1600" x="0" y="0"/><rect fill="url(#g2)" height="220" width="190" x="0" y="0"/><path d="M0 0 H190 V110 A110 110 0 0 1 80 220 H0 Z" fill="url(#g4)"/><rect fill="url(#g1)" height="200" width="190" x="0" y="220"/><rect fill="url(#g3)" height="480" width="190" x="0" y="420"/><path d="M0 900 V680 A200 200 0 0 0 200 480 H230 V900 Z" fill="url(#g2)"/><rect fill="url(#g5)" height="900" width="185" x="190" y="0"/><rect fill="url(#g4)" height="900" width="125" x="375" y="0"/><rect fill="url(#g6)" height="900" width="135" x="500" y="0"/><rect fill="url(#g0)" height="900" width="315" x="635" y="0"/><rect fill="url(#g1)" height="585" width="265" x="635" y="75"/><rect fill="url(#g3)" height="585" width="50" x="900" y="75"/><rect fill="url(#g5)" height="90" width="315" x="635" y="660"/><rect fill="url(#g0)" height="150" width="315" x="635" y="750"/><path d="M500 0 H635 V900 H500 Z" fill="url(#g6)"/><path d="M500 0 A135 135 0 0 1 635 135 V750 H500 Z" fill="url(#g6)"/><rect fill="url(#g0)" height="900" width="260" x="950" y="0"/><rect fill="url(#g2)" height="340" width="260" x="950" y="75"/><rect fill="url(#g0)" height="245" width="260" x="950" y="415"/><rect fill="url(#g3)" height="90" width="260" x="950" y="660"/><rect fill="url(#g2)" height="150" width="260" x="950" y="750"/><rect fill="url(#g2)" height="900" width="390" x="1210" y="0"/><rect fill="url(#g5)" height="100" width="390" x="1210" y="0"/><rect fill="url(#g1)" height="220" width="390" x="1210" y="100"/><rect fill="url(#g0)" height="95" width="390" x="1210" y="320"/><rect fill="url(#g2)" height="350" width="390" x="1210" y="415"/><rect fill="url(#g1)" height="135" width="390" x="1210" y="765"/><path d="M1210 0 H1340 V220 A100 100 0 0 0 1440 320 H1210 Z" fill="url(#g6)"/><path d="M1210 415 H1370 V630 A110 110 0 0 1 1260 740 H1210 Z" fill="url(#g3)"/><rect fill="url(#g4)" height="315" width="25" x="1340" y="100"/><rect fill="url(#g3)" height="315" width="45" x="1390" y="100"/></svg>' },
+  { name: 'Pattern 3',
+    svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900"><rect fill="url(#g0)" height="900" width="1600" x="0" y="0"/><rect fill="url(#g3)" height="110" width="360" x="0" y="0"/><rect fill="url(#g4)" height="335" width="360" x="0" y="110"/><rect fill="url(#g3)" height="330" width="360" x="0" y="445"/><rect fill="url(#g0)" height="125" width="360" x="0" y="775"/><rect fill="url(#g0)" height="900" width="290" x="360" y="0"/><rect fill="url(#g2)" height="110" width="290" x="360" y="0"/><rect fill="url(#g3)" height="900" width="300" x="650" y="0"/><rect fill="url(#g0)" height="900" width="260" x="950" y="0"/><rect fill="url(#g0)" height="900" width="390" x="1210" y="0"/><circle cx="525" cy="390" fill="url(#g4)" r="335"/><rect fill="url(#g0)" height="570" width="290" x="360" y="110"/><rect fill="url(#g0)" height="235" width="290" x="360" y="445"/><path d="M650 65 A325 325 0 0 1 650 715 Z" fill="url(#g1)"/><rect fill="url(#g3)" height="90" width="300" x="650" y="0"/><rect fill="url(#g1)" height="355" width="300" x="650" y="90"/><rect fill="url(#g3)" height="80" width="300" x="650" y="445"/><rect fill="url(#g5)" height="240" width="300" x="650" y="525"/><circle cx="950" cy="360" fill="url(#g1)" r="295"/><rect fill="url(#g0)" height="760" width="125" x="950" y="0"/><path d="M1075 0 A285 285 0 0 1 1360 285 V390 H1075 Z" fill="url(#g5)"/><rect fill="url(#g3)" height="65" width="285" x="1075" y="390"/><rect fill="url(#g4)" height="75" width="285" x="1075" y="455"/><rect fill="url(#g2)" height="75" width="285" x="1075" y="530"/><rect fill="url(#g3)" height="75" width="285" x="1075" y="605"/><rect fill="url(#g4)" height="80" width="285" x="1075" y="680"/><rect fill="url(#g0)" height="140" width="285" x="1075" y="760"/><rect fill="url(#g2)" height="130" width="240" x="1360" y="0"/><rect fill="url(#g0)" height="270" width="240" x="1360" y="130"/><rect fill="url(#g2)" height="225" width="240" x="1360" y="400"/><rect fill="url(#g5)" height="275" width="240" x="1360" y="625"/><path d="M1360 900 V625 H1600 A240 240 0 0 0 1360 865 Z" fill="url(#g2)"/><path d="M0 900 H360 A360 360 0 0 0 360 540 Z" fill="url(#g3)"/><rect fill="url(#g2)" height="25" width="360" x="0" y="780"/><rect fill="url(#g6)" height="30" width="360" x="0" y="850"/></svg>' },
 ];
 
 // =====================================================================================
@@ -385,6 +541,10 @@ const PALETTES = {
 
 const GLASS = [ // id, label, min, max, step, default
   ['patScale', 'Pattern scale',   1, 3, 0.01, 1],
+  ['shift',    'Size shift',      0, 1, 0.01, 0],
+  ['shiftK',   'Shift detail',    1, 4, 1, 2],
+  ['warp',     'Organic warp',    0, 0.25, 0.005, 0],
+  ['warpFreq', 'Warp detail',     0.5, 8, 0.1, 2],
   ['disp',     'Displacement',    0, 0.6, 0.005, 0.22],
   ['zoomVar',  'Magnification',   0, 1.2, 0.01, 0.5],
   ['rot',      'Twist',           0, 0.6, 0.005, 0.06],
@@ -413,7 +573,9 @@ function addSliders(list, host) {
       params[id] = +e.target.value;
       row.querySelector('output').textContent = e.target.value;
       schedule();
+      if (id === 'shift' || id === 'shiftK') refreshPattern(false);
     });
+    if (id === 'shift' || id === 'shiftK') row.querySelector('input').addEventListener('change', () => refreshPattern(true));
     sliders.push(row.querySelector('input'));
     host.append(row);
   }
@@ -435,7 +597,7 @@ updateSwatches();
 $('palette').addEventListener('change', () => { updateSwatches(); schedule(); });
 $('fit').addEventListener('change', schedule);
 $('mono').addEventListener('change', schedule);
-$('shuffle').addEventListener('click', () => { seed = 1 + Math.floor(Math.random() * 1e6); schedule(); });
+$('shuffle').addEventListener('click', () => { seed = 1 + Math.floor(Math.random() * 1e6); schedule(); refreshPattern(true); });
 $('shuffleColors').addEventListener('click', () => {
   for (let i = 5; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [colorOrder[i], colorOrder[j]] = [colorOrder[j], colorOrder[i]]; }
   updateSwatches(); schedule();
@@ -443,6 +605,7 @@ $('shuffleColors').addEventListener('click', () => {
 $('reset').addEventListener('click', () => {
   // zero everything; the two zoom sliders can't reach 0, so they go to their neutral 1
   for (const el of sliders) { el.value = +el.min > 0 ? 1 : 0; el.dispatchEvent(new Event('input')); }
+  refreshPattern(true);
 });
 $('open').addEventListener('click', () => $('file').click());
 $('drop').addEventListener('click', () => $('file').click());
@@ -479,7 +642,7 @@ function loadFile(file) {
 function loadUrl(url) {
   return new Promise((res, rej) => {
     const img = new Image();
-    img.onload = () => { setImage(img); res(); };
+    img.onload = () => { try { setImage(img); res(); } catch (e) { rej(e); } };
     img.onerror = rej;
     img.src = url;
   });
@@ -530,12 +693,10 @@ function usePattern(m) {
   schedule();
 }
 
-// ---- pattern picker: built-in mural, library files, and SVGs loaded at runtime
-const patterns = { mural: { name: 'Mural', build: async () => buildPatternMap() } };
-PATTERN_LIBRARY.forEach((p, i) => {
-  patterns['lib' + i] = { name: p.name, build: () =>
-    buildSvgPatternMap(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="${p.viewBox}"><path d="${p.d}"/></svg>`) };
-});
+// ---- pattern picker: built-in mural, library patterns, and SVGs loaded at runtime
+const patterns = { mural: { name: 'Mural', build: async opts => buildPatternMap(opts) } };
+PATTERN_LIBRARY.forEach((p, i) => { patterns['lib' + i] = { name: p.name, build: opts => buildSvgPatternMap(p.svg, opts) }; });
+let currentKey = null;
 function patternStatus(msg, error) { $('patternStatus').textContent = msg; $('patternStatus').classList.toggle('error', !!error); }
 
 // Small preview of a pattern map: panes in grey shades, cracks as light lines.
@@ -571,17 +732,39 @@ async function selectPattern(key) {
   const p = patterns[key];
   try {
     p.map = p.map || await (p.building = p.building || p.build());
+    currentKey = key;
     for (const q of Object.values(patterns)) q.tile.classList.toggle('active', q === p);
     patternStatus(p.name + ' · ' + p.map.panes + ' panes');
-    usePattern(p.map);
+    refreshPattern(true);
   } catch (e) { patternStatus(e.message, true); }
+}
+// Size shift rebuilds the pattern from its geometry. While a slider is dragged we build a
+// half-resolution preview; the full-resolution one follows when it is released.
+function shiftSpec() {
+  const u = (seed % 1000) / 10;
+  return params.shift > 0 ? { amount: params.shift, k: params.shiftK, phx: u * 3.1, phy: u * 5.3 + 2 } : null;
+}
+let shiftBusy = false, shiftQueued = null;
+async function refreshPattern(final) {
+  const p = patterns[currentKey];
+  if (!p || !p.map) return;
+  if (shiftBusy) { shiftQueued = { final: final || !!(shiftQueued && shiftQueued.final) }; return; }
+  const spec = shiftSpec();
+  if (!spec) { usePattern(p.map); return; }
+  shiftBusy = true;
+  try {
+    const m = await p.build({ shift: spec, W: final ? 2048 : 1024 });
+    if (patterns[currentKey] === p) usePattern(m);
+  } catch (e) { patternStatus(e.message, true); }
+  shiftBusy = false;
+  if (shiftQueued) { const q = shiftQueued; shiftQueued = null; refreshPattern(q.final); }
 }
 async function loadPatternFile(file) {
   if (!file) return;
   try {
-    const m = await buildSvgPatternMap(await file.text());
+    const text = await file.text(), m = await buildSvgPatternMap(text);
     const key = 'file' + Object.keys(patterns).length, name = file.name.replace(/\.svg$/i, '');
-    patterns[key] = { name, map: m };
+    patterns[key] = { name, map: m, build: opts => buildSvgPatternMap(text, opts) };
     addPatternTile(key);
     selectPattern(key);
   } catch (e) { patternStatus(file.name + ': ' + e.message, true); }
@@ -622,8 +805,9 @@ function render() {
   gl.uniform2f(U('uRes'), canvas.width, canvas.height);
   gl.uniform1f(U('uAspect'), aspect);
   gl.uniform1f(U('uSeed'), (seed % 1000) / 10);
-  for (const k of ['disp', 'zoomVar', 'rot', 'zoom', 'edge', 'tint', 'grain'])
+  for (const k of ['shift', 'shiftK', 'warp', 'warpFreq', 'disp', 'zoomVar', 'rot', 'zoom', 'edge', 'tint', 'grain'])
     gl.uniform1f(U('u' + k[0].toUpperCase() + k.slice(1)), params[k]);
+  gl.uniform1f(U('uShift'), map.shifted ? 0 : params.shift); // already baked into the map when shifted
   gl.uniform1f(U('uMono'), $('mono').checked ? 1 : 0);
   const pal = currentPalette();
   gl.uniform1f(U('uColor'), pal ? params.color : 0);
@@ -632,8 +816,8 @@ function render() {
 }
 function schedule() { cancelAnimationFrame(raf); raf = requestAnimationFrame(render); }
 
-// optional: index.html?src=photo.jpg when served over http
-if (query.get('src')) loadUrl(query.get('src')).catch(() => {});
+// start with the default image (or ?src=photo.jpg); if it can't be loaded the drop zone stays
+if (query.get('src') || window.DEFAULT_IMAGE) loadUrl(query.get('src') || window.DEFAULT_IMAGE).catch(() => {});
 </script>
 </body>
 </html>

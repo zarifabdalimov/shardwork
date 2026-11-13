@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:ev="http://www.w3.org/2001/xml-events" xmlns:xlink="http://www.w3.org/1999/xlink" baseProfile="full" height="900px" version="1.1" viewBox="0 0 1600 900" width="1600px">
+  <defs>
+    <linearGradient id="g0" x1="0%" x2="100%" y1="0%" y2="100%">
+      <stop offset="0" stop-color="#09283b"/>
+      <stop offset="1" stop-color="#3b7180"/>
+    </linearGradient>
+    <linearGradient id="g1" x1="0%" x2="100%" y1="0%" y2="100%">
+      <stop offset="0" stop-color="#f3dfb6"/>
+      <stop offset="1" stop-color="#b98b67"/>
+    </linearGradient>
+    <linearGradient id="g2" x1="0%" x2="100%" y1="0%" y2="100%">
+      <stop offset="0" stop-color="#a7b7a5"/>
+      <stop offset="1" stop-color="#3b7180"/>
+    </linearGradient>
+    <linearGradient id="g3" x1="0%" x2="100%" y1="0%" y2="100%">
+      <stop offset="0" stop-color="#402c29"/>
+      <stop offset="1" stop-color="#965435"/>
+    </linearGradient>
+    <linearGradient id="g4" x1="0%" x2="100%" y1="0%" y2="100%">
+      <stop offset="0" stop-color="#778879"/>
+      <stop offset="1" stop-color="#e8d4ac"/>
+    </linearGradient>
+    <linearGradient id="g5" x1="0%" x2="100%" y1="0%" y2="100%">
+      <stop offset="0" stop-color="#0a2636"/>
+      <stop offset="1" stop-color="#627a7a"/>
+    </linearGradient>
+    <linearGradient id="g6" x1="0%" x2="100%" y1="0%" y2="100%">
+      <stop offset="0" stop-color="#b66a3c"/>
+      <stop offset="1" stop-color="#e7b88c"/>
+    </linearGradient>
+  </defs>
+  <rect fill="url(#g0)" height="900" width="1600" x="0" y="0"/>
+  <rect fill="url(#g2)" height="220" width="190" x="0" y="0"/>
+  <path d="M0 0 H190 V110 A110 110 0 0 1 80 220 H0 Z" fill="url(#g4)"/>
+  <rect fill="url(#g1)" height="200" width="190" x="0" y="220"/>
+  <rect fill="url(#g3)" height="480" width="190" x="0" y="420"/>
+  <path d="M0 900 V680 A200 200 0 0 0 200 480 H230 V900 Z" fill="url(#g2)"/>
+  <rect fill="url(#g5)" height="900" width="185" x="190" y="0"/>
+  <rect fill="url(#g4)" height="900" width="125" x="375" y="0"/>
+  <rect fill="url(#g6)" height="900" width="135" x="500" y="0"/>
+  <rect fill="url(#g0)" height="900" width="315" x="635" y="0"/>
+  <rect fill="url(#g1)" height="585" width="265" x="635" y="75"/>
+  <rect fill="url(#g3)" height="585" width="50" x="900" y="75"/>
+  <rect fill="url(#g5)" height="90" width="315" x="635" y="660"/>
+  <rect fill="url(#g0)" height="150" width="315" x="635" y="750"/>
+  <path d="M500 0 H635 V900 H500 Z" fill="url(#g6)"/>
+  <path d="M500 0 A135 135 0 0 1 635 135 V750 H500 Z" fill="url(#g6)"/>
+  <rect fill="url(#g0)" height="900" width="260" x="950" y="0"/>
+  <rect fill="url(#g2)" height="340" width="260" x="950" y="75"/>
+  <rect fill="url(#g0)" height="245" width="260" x="950" y="415"/>
+  <rect fill="url(#g3)" height="90" width="260" x="950" y="660"/>
+  <rect fill="url(#g2)" height="150" width="260" x="950" y="750"/>
+  <rect fill="url(#g2)" height="900" width="390" x="1210" y="0"/>
+  <rect fill="url(#g5)" height="100" width="390" x="1210" y="0"/>
+  <rect fill="url(#g1)" height="220" width="390" x="1210" y="100"/>
+  <rect fill="url(#g0)" height="95" width="390" x="1210" y="320"/>
+  <rect fill="url(#g2)" height="350" width="390" x="1210" y="415"/>
+  <rect fill="url(#g1)" height="135" width="390" x="1210" y="765"/>
+  <path d="M1210 0 H1340 V220 A100 100 0 0 0 1440 320 H1210 Z" fill="url(#g6)"/>
+  <path d="M1210 415 H1370 V630 A110 110 0 0 1 1260 740 H1210 Z" fill="url(#g3)"/>
+  <rect fill="url(#g4)" height="315" width="25" x="1340" y="100"/>
+  <rect fill="url(#g3)" height="315" width="45" x="1390" y="100"/>
+</svg>
