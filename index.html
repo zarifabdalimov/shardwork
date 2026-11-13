@@ -99,7 +99,9 @@ uniform sampler2D uMap;  // pattern map: R = pane id, GB = pane centre, A = pale
 uniform float uAspect;
 uniform vec2 uRes, uFit; // uFit: canvas uv -> pattern uv scale
 uniform float uSeed, uDisp, uZoomVar, uRot, uZoom, uEdge, uGrain, uTint, uMono, uColor;
-uniform vec3 uPal[6];
+uniform sampler2D uInfo; // per pane: its bounding box (x0, y0, x1, y1) in pattern uv
+uniform vec3 uPalA[8], uPalB[8]; // gradient start / end colour per palette slot
+uniform float uGrad;
 
 float h1(float n) { return fract(sin(n * 12.9898 + uSeed * 7.233) * 43758.5453); }
 vec4 pane(vec2 uv) { return texture2D(uMap, (uv - 0.5) * uFit + 0.5); }
@@ -123,10 +125,14 @@ void main() {
   float lum = dot(col, vec3(0.299, 0.587, 0.114));
   if (uMono > 0.5) col = vec3(lum);
 
-  // palette: every pane is tinted with the colour of its slot
-  float slot = floor(m.a * 255.0 / 40.0 + 0.5);
-  vec3 pc = uPal[0];
-  for (int i = 1; i < 6; i++) if (float(i) == slot) pc = uPal[i];
+  // palette: every pane is tinted with its slot's gradient, running corner to corner across the pane
+  float slot = floor(m.a * 255.0 / 30.0 + 0.5);
+  vec3 pa = uPalA[0], pb = uPalB[0];
+  for (int i = 1; i < 8; i++) if (float(i) == slot) { pa = uPalA[i]; pb = uPalB[i]; }
+  vec4 bb = texture2D(uInfo, vec2((floor(m.r * 255.0 + 0.5) + 0.5) / 256.0, 0.5));
+  vec2 pp = (vUv - 0.5) * uFit + 0.5;
+  float gt = clamp(((pp.x - bb.x) / max(bb.z - bb.x, 0.004) + (bb.w - pp.y) / max(bb.w - bb.y, 0.004)) * 0.5, 0.0, 1.0);
+  vec3 pc = mix(pa, pb, 0.5 + (gt - 0.5) * uGrad);
   col = mix(col, pc * mix(lum, 1.0, 0.12), uColor);
 
   // slightly different glass density per pane
@@ -290,9 +296,11 @@ function packMap(ids, W, H, count, slotOf) {
     out[o] = id;
     out[o + 1] = Math.round((bx0[id] + bx1[id]) / 2 / W * 255);
     out[o + 2] = Math.round((1 - (by0[id] + by1[id]) / 2 / H) * 255);
-    out[o + 3] = slotOf(id) * 40;
+    out[o + 3] = slotOf(id) * 30;
   }
-  return { data: out, W, H, aspect: W / H, panes: count };
+  const info = new Uint8Array(256 * 4); // bounding box per pane id, y bottom-up like the map
+  for (let id = 1; id < n; id++) info.set([bx0[id] / W, 1 - (by1[id] + 1) / H, (bx1[id] + 1) / W, 1 - by0[id] / H].map(v => Math.round(v * 255)), id * 4);
+  return { data: out, info, W, H, aspect: W / H, panes: count };
 }
 
 // =====================================================================================
@@ -333,7 +341,7 @@ async function buildSvgPatternMap(text) {
     if (!fillMode || fills[i] === 'none') { el.setAttribute('style', stroke); return; }
     const rgb = [(i * 53 + 7) % 251, (i * 37 + 11) % 256, (i * 91 + 53) % 256];
     keyToClass.set(rgb[0] << 16 | rgb[1] << 8 | rgb[2], classSlot.length);
-    if (!slotOfFill.has(fills[i])) slotOfFill.set(fills[i], slotOfFill.size % 6);
+    if (!slotOfFill.has(fills[i])) slotOfFill.set(fills[i], slotOfFill.size % 8);
     classSlot.push(slotOfFill.get(fills[i]));
     el.setAttribute('style', `fill:rgb(${rgb})!important;fill-opacity:1!important;stroke:none!important`);
   });
@@ -411,18 +419,31 @@ const PATTERN_LIBRARY = [
 ];
 
 // =====================================================================================
-// Palettes — six colours each, in slot order (dark cool, mid cool, dark warm, mid warm, light, neutral)
+// Palettes — one entry per palette slot (up to 8; shorter palettes repeat). An entry is either a
+// [from, to] gradient pair, or a single colour from which a darker-to-lighter gradient is derived.
+// Slot order: dark cool, mid cool, dark warm, mid warm, light, neutral.
 // =====================================================================================
 const PALETTES = {
   'None (original)': null,
+  // the gradients used in the designer pattern files (pattern_1..3.svg)
+  'Studio':  [['#09283b', '#3b7180'], ['#a7b7a5', '#3b7180'], ['#402c29', '#965435'], ['#b66a3c', '#e7b88c'],
+              ['#f3dfb6', '#b98b67'], ['#778879', '#e8d4ac'], ['#0a2636', '#627a7a']],
   'Mural':   ['#1f3a5a', '#4f7a9c', '#4a2f26', '#8a4a33', '#e3d2bd', '#9a9a98'],
   'Bauhaus': ['#1d3557', '#2a6fb0', '#1a1a1a', '#d62828', '#f6c945', '#efe9dc'],
-  'Sunset':  ['#2d1b4e', '#6a3d9a', '#b0304f', '#f26a4b', '#ffd27a', '#f7a072'],
+  'Sunset':  [['#2d1b4e', '#6a3d9a'], ['#6a3d9a', '#b0304f'], ['#b0304f', '#f26a4b'], ['#f26a4b', '#ffd27a'], ['#ffd27a', '#f7a072'], ['#f7a072', '#6a3d9a']],
   'Forest':  ['#12372a', '#436850', '#5b4636', '#a47148', '#f1e8cf', '#adbc9f'],
-  'Ocean':   ['#0a2540', '#1f6f8b', '#073b3a', '#2aa198', '#e0f4f1', '#99c1de'],
+  'Ocean':   [['#0a2540', '#1f6f8b'], ['#1f6f8b', '#99c1de'], ['#073b3a', '#2aa198'], ['#2aa198', '#e0f4f1'], ['#e0f4f1', '#99c1de'], ['#99c1de', '#0a2540']],
   'Pastel':  ['#7d9bd1', '#a8d5e2', '#c79bd0', '#f6a6b2', '#fdf0d5', '#c9e4c5'],
-  'Neon':    ['#0b0f3b', '#00c2ff', '#5a00d6', '#ff2e93', '#e9ff4d', '#2af5b0'],
+  'Neon':    [['#0b0f3b', '#5a00d6'], ['#00c2ff', '#2af5b0'], ['#5a00d6', '#ff2e93'], ['#ff2e93', '#e9ff4d'], ['#e9ff4d', '#2af5b0'], ['#2af5b0', '#00c2ff']],
 };
+const hexRgb = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16) / 255);
+const rgbHex = c => '#' + c.map(v => Math.round(Math.min(1, Math.max(0, v)) * 255).toString(16).padStart(2, '0')).join('');
+// palette entry -> [from, to] as rgb triples
+function gradientOf(entry) {
+  if (Array.isArray(entry)) return entry.map(hexRgb);
+  const c = hexRgb(entry);
+  return [c.map(v => v * 0.6), c.map(v => v + (1 - v) * 0.3)];
+}
 
 // Sliders, grouped as in the sidebar: id, label, min, max, step, default
 const IMAGE_SLIDERS = [
@@ -439,12 +460,15 @@ const SHARD_SLIDERS = [
   ['edge',     'Edge highlights', 0, 1, 0.01, 0.5],
   ['tint',     'Glass tint',      0, 0.5, 0.01, 0.14],
 ];
-const COLOR_SLIDERS = [['color', 'Color strength', 0, 1, 0.01, 0.85]];
+const COLOR_SLIDERS = [
+  ['color', 'Color strength', 0, 1, 0.01, 0.85],
+  ['grad',  'Gradient',       0, 1, 0.01, 1],
+];
 const MAX_SIDE = 2400;
 const $ = id => document.getElementById(id);
 const query = new URLSearchParams(location.search); // any control can be preset, e.g. ?palette=Mural&disp=0.1
 const params = {};
-let seed = 1, colorOrder = [0, 1, 2, 3, 4, 5], hasImage = false, raf = 0;
+let seed = 1, colorOrder = [0, 1, 2, 3, 4, 5, 6, 7], hasImage = false, raf = 0;
 
 // ---- controls
 const sliders = [];
@@ -474,10 +498,10 @@ if (query.has('fit')) $('fit').value = query.get('fit');
 if (query.has('mono')) $('mono').checked = query.get('mono') !== '0';
 function currentPalette() {
   const p = PALETTES[$('palette').value];
-  return p && colorOrder.map(i => p[i]);
+  return p && colorOrder.map(i => gradientOf(p[i % p.length])); // 8 slots of [from, to]
 }
 function updateSwatches() {
-  $('swatches').innerHTML = (currentPalette() || []).map(c => `<i style="background:${c}"></i>`).join('');
+  $('swatches').innerHTML = (currentPalette() || []).map(([a, b]) => `<i style="background:linear-gradient(135deg,${rgbHex(a)},${rgbHex(b)})"></i>`).join('');
 }
 updateSwatches();
 $('palette').addEventListener('change', () => { updateSwatches(); schedule(); });
@@ -485,7 +509,7 @@ $('fit').addEventListener('change', schedule);
 $('mono').addEventListener('change', schedule);
 $('shuffle').addEventListener('click', () => { seed = 1 + Math.floor(Math.random() * 1e6); schedule(); });
 $('shuffleColors').addEventListener('click', () => {
-  for (let i = 5; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [colorOrder[i], colorOrder[j]] = [colorOrder[j], colorOrder[i]]; }
+  for (let i = colorOrder.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [colorOrder[i], colorOrder[j]] = [colorOrder[j], colorOrder[i]]; }
   updateSwatches(); schedule();
 });
 $('reset').addEventListener('click', () => {
@@ -565,6 +589,7 @@ function makeTexture(unit, filter) {
     gl.texParameteri(gl.TEXTURE_2D, k, v);
 }
 makeTexture(1, gl.NEAREST);
+makeTexture(2, gl.NEAREST);
 makeTexture(0, gl.LINEAR);
 gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
 let map = null; // the pattern in use
@@ -573,6 +598,8 @@ function usePattern(m) {
   gl.activeTexture(gl.TEXTURE1);
   gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false); // map rows are already bottom-up
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, m.W, m.H, 0, gl.RGBA, gl.UNSIGNED_BYTE, m.data);
+  gl.activeTexture(gl.TEXTURE2);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 256, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, m.info);
   gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
   gl.activeTexture(gl.TEXTURE0);
   schedule();
@@ -593,7 +620,7 @@ function drawThumb(m) {
   for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
     const i = at(x, y), id = m.data[i], o = (y * w + x) * 4;
     const edge = id !== m.data[at(Math.min(w - 1, x + 1), y)] || id !== m.data[at(x, Math.min(h - 1, y + 1))];
-    const v = edge ? 225 : 52 + m.data[i + 3] / 40 * 17;
+    const v = edge ? 225 : 52 + m.data[i + 3] / 30 * 14;
     img.data[o] = v; img.data[o + 1] = v; img.data[o + 2] = v + (edge ? 0 : 6); img.data[o + 3] = 255;
   }
   ctx.putImageData(img, 0, 0);
@@ -637,6 +664,7 @@ $('patternFile').addEventListener('change', e => { loadPatternFile(e.target.file
 selectPattern(Object.keys(patterns).find(k => patterns[k].name === query.get('pattern')) || 'mural');
 gl.uniform1i(U('uTex'), 0);
 gl.uniform1i(U('uMap'), 1);
+gl.uniform1i(U('uInfo'), 2);
 
 function setImage(img) {
   const s = Math.min(1, MAX_SIDE / Math.max(img.naturalWidth, img.naturalHeight));
@@ -672,7 +700,11 @@ function render() {
   gl.uniform1f(U('uMono'), $('mono').checked ? 1 : 0);
   const pal = currentPalette();
   gl.uniform1f(U('uColor'), pal ? params.color : 0);
-  if (pal) gl.uniform3fv(U('uPal[0]'), new Float32Array(pal.flatMap(h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16) / 255))));
+  gl.uniform1f(U('uGrad'), params.grad);
+  if (pal) {
+    gl.uniform3fv(U('uPalA[0]'), new Float32Array(pal.flatMap(g => g[0])));
+    gl.uniform3fv(U('uPalB[0]'), new Float32Array(pal.flatMap(g => g[1])));
+  }
   gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 }
 function schedule() { cancelAnimationFrame(raf); raf = requestAnimationFrame(render); }
