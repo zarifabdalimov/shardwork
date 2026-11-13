@@ -34,6 +34,15 @@
   body.has-image #drop { display: none; }
   body.has-image canvas { display: block; }
   body.dragging main::after { content: "Drop image"; position: absolute; inset: 12px; border: 2px solid var(--accent); border-radius: 12px; background: rgba(17,18,20,.8); display: flex; align-items: center; justify-content: center; font-size: 18px; pointer-events: none; }
+  .pick-label { color: var(--dim); font-size: 12px; }
+  #patternGrid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  #patternGrid button { padding: 4px 4px 5px; display: flex; flex-direction: column; align-items: center; gap: 4px; min-width: 0; }
+  #patternGrid button.active { border-color: var(--accent); background: #30343c; }
+  #patternGrid .thumb { width: 100%; aspect-ratio: 1; display: flex; align-items: center; justify-content: center; color: var(--dim); font-size: 10px; }
+  #patternGrid .thumb { position: relative; }
+  #patternGrid canvas { display: block; position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; box-shadow: none; }
+  #patternGrid span { font-size: 10px; color: var(--dim); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #patternGrid button.active span { color: var(--text); }
   .status { color: var(--dim); font-size: 11px; min-height: 14px; }
   .status.error { color: #ff8a80; }
   .hint { color: var(--dim); font-size: 11px; margin-top: auto; }
@@ -46,7 +55,8 @@
 
   <h2>Glass</h2>
   <div id="glassControls"></div>
-  <label class="pick">Pattern <select id="pattern"></select></label>
+  <div class="pick-label">Pattern</div>
+  <div id="patternGrid"></div>
   <button id="loadPattern">Load pattern SVG…</button>
   <div id="patternStatus" class="status"></div>
   <label class="pick">Pattern fit
@@ -350,10 +360,13 @@ async function buildSvgPatternMap(text) {
   return packMap(ids, W, H, keep.length, id => (id * 5 + 2) % 6);
 }
 
-// Patterns shipped with the page: add an SVG to patterns/ and list it here.
+// Patterns shipped with the page, embedded so they work even when the page is opened as a local file.
+// To add one: give it a name, the SVG's viewBox, and ONE path of crack lines (the "d" attribute).
 const PATTERN_LIBRARY = [
-  { name: 'Portrait 4:5', url: 'patterns/portrait.svg' },
-  { name: 'Facets (example)', url: 'patterns/facets.svg' },
+  { name: 'Portrait 4:5', viewBox: '0 0 1024 1280',
+    d: 'M0,0H1024V1280H0Z M0,120H1024 M270,0V520 M660,0V120 M540,120V1280 M790,0V1280 M0,520H540 M0,600H540 M0,930H540 M540,860H1024 M720,452A320,320 0 1 0 80,452A320,320 0 1 0 720,452Z M1110,470A250,250 0 1 0 610,470A250,250 0 1 0 1110,470Z M790,178.3A300,300 0 0 1 1024,219 M1024,721A300,300 0 0 1 790,761.7 M540,400L709.1,369.2 M0,600A165,165 0 0 1 0,930 M0,864.3A420,420 0 0 1 480,1280 M590,860A200,200 0 0 0 790,1060 M540,1130L680,1280 M790,940H1024 M790,1010H1024 M790,1080H1024 M790,1150H1024' },
+  { name: 'Facets', viewBox: '0 0 1200 900',
+    d: 'M0,0H1200V900H0Z M0,250L420,0 M420,0L700,900 M0,250L560,450 M560,450L1200,180 M560,450L250,900 M0,620L405,675 M700,900L1200,560 M850,327L960,724 M620,0L770,360 M1200,180L900,0 M110,900L170,643 M330,128A190,190 0 0 1 475,398 M960,724A260,260 0 0 0 1200,400' },
 ];
 
 // =====================================================================================
@@ -520,24 +533,48 @@ function usePattern(m) {
 // ---- pattern picker: built-in mural, library files, and SVGs loaded at runtime
 const patterns = { mural: { name: 'Mural', build: async () => buildPatternMap() } };
 PATTERN_LIBRARY.forEach((p, i) => {
-  patterns['lib' + i] = { name: p.name, build: async () => {
-    const r = await fetch(p.url).catch(() => null);
-    if (!r || !r.ok) throw new Error(location.protocol === 'file:' ? 'Library patterns need the page served over http — or use "Load pattern SVG"' : 'Could not load ' + p.url);
-    return buildSvgPatternMap(await r.text());
-  } };
+  patterns['lib' + i] = { name: p.name, build: () =>
+    buildSvgPatternMap(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="${p.viewBox}"><path d="${p.d}"/></svg>`) };
 });
 function patternStatus(msg, error) { $('patternStatus').textContent = msg; $('patternStatus').classList.toggle('error', !!error); }
+
+// Small preview of a pattern map: panes in grey shades, cracks as light lines.
+function drawThumb(m) {
+  const S = 144, w = m.aspect >= 1 ? S : Math.round(S * m.aspect), h = m.aspect >= 1 ? Math.round(S / m.aspect) : S;
+  const cv = document.createElement('canvas');
+  cv.width = w; cv.height = h;
+  const ctx = cv.getContext('2d'), img = ctx.createImageData(w, h);
+  const at = (x, y) => (Math.min(m.H - 1, Math.floor((1 - (y + 0.5) / h) * m.H)) * m.W + Math.min(m.W - 1, Math.floor((x + 0.5) / w * m.W))) * 4;
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = at(x, y), id = m.data[i], o = (y * w + x) * 4;
+    const edge = id !== m.data[at(Math.min(w - 1, x + 1), y)] || id !== m.data[at(x, Math.min(h - 1, y + 1))];
+    const v = edge ? 225 : 52 + m.data[i + 3] / 40 * 17;
+    img.data[o] = v; img.data[o + 1] = v; img.data[o + 2] = v + (edge ? 0 : 6); img.data[o + 3] = 255;
+  }
+  ctx.putImageData(img, 0, 0);
+  return cv;
+}
+function addPatternTile(key) {
+  const p = patterns[key], btn = document.createElement('button');
+  btn.title = p.name;
+  btn.innerHTML = '<div class="thumb">…</div><span></span>';
+  btn.querySelector('span').textContent = p.name;
+  btn.addEventListener('click', () => selectPattern(key));
+  p.tile = btn;
+  $('patternGrid').append(btn);
+  // build in the background so the preview shows up even before the pattern is picked
+  (p.map ? Promise.resolve(p.map) : (p.building = p.building || p.build())).then(m => {
+    p.map = m; btn.querySelector('.thumb').replaceChildren(drawThumb(m));
+  }).catch(() => { btn.querySelector('.thumb').textContent = 'n/a'; });
+}
 async function selectPattern(key) {
   const p = patterns[key];
   try {
-    p.map = p.map || await p.build();
-    $('pattern').value = key;
-    patternStatus(p.map.panes + ' panes');
+    p.map = p.map || await (p.building = p.building || p.build());
+    for (const q of Object.values(patterns)) q.tile.classList.toggle('active', q === p);
+    patternStatus(p.name + ' · ' + p.map.panes + ' panes');
     usePattern(p.map);
-  } catch (e) {
-    patternStatus(e.message, true);
-    if (map) $('pattern').value = Object.keys(patterns).find(k => patterns[k].map === map);
-  }
+  } catch (e) { patternStatus(e.message, true); }
 }
 async function loadPatternFile(file) {
   if (!file) return;
@@ -545,12 +582,11 @@ async function loadPatternFile(file) {
     const m = await buildSvgPatternMap(await file.text());
     const key = 'file' + Object.keys(patterns).length, name = file.name.replace(/\.svg$/i, '');
     patterns[key] = { name, map: m };
-    $('pattern').add(new Option(name, key));
+    addPatternTile(key);
     selectPattern(key);
   } catch (e) { patternStatus(file.name + ': ' + e.message, true); }
 }
-for (const [key, p] of Object.entries(patterns)) $('pattern').add(new Option(p.name, key));
-$('pattern').addEventListener('change', e => selectPattern(e.target.value));
+Object.keys(patterns).forEach(addPatternTile);
 $('loadPattern').addEventListener('click', () => $('patternFile').click());
 $('patternFile').addEventListener('change', e => { loadPatternFile(e.target.files[0]); e.target.value = ''; });
 selectPattern(Object.keys(patterns).find(k => patterns[k].name === query.get('pattern')) || 'mural');
