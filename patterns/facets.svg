@@ -1,0 +1,4 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 900">
+  <!-- Example Shardwork pattern: ONE path of crack lines. Every closed region between lines becomes a pane. -->
+  <path fill="none" stroke="#000" stroke-width="2" d="M0,0H1200V900H0Z M0,250L420,0 M420,0L700,900 M0,250L560,450 M560,450L1200,180 M560,450L250,900 M0,620L405,675 M700,900L1200,560 M850,327L960,724 M620,0L770,360 M1200,180L900,0 M110,900L170,643 M330,128A190,190 0 0 1 475,398 M960,724A260,260 0 0 0 1200,400"/>
+</svg>

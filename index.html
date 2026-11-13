@@ -34,6 +34,8 @@
   body.has-image #drop { display: none; }
   body.has-image canvas { display: block; }
   body.dragging main::after { content: "Drop image"; position: absolute; inset: 12px; border: 2px solid var(--accent); border-radius: 12px; background: rgba(17,18,20,.8); display: flex; align-items: center; justify-content: center; font-size: 18px; pointer-events: none; }
+  .status { color: var(--dim); font-size: 11px; min-height: 14px; }
+  .status.error { color: #ff8a80; }
   .hint { color: var(--dim); font-size: 11px; margin-top: auto; }
   @media (max-width: 720px) { body { flex-direction: column-reverse; } aside { width: 100%; max-height: 45%; border-right: 0; border-top: 1px solid var(--line); } }
 </style>
@@ -44,6 +46,9 @@
 
   <h2>Glass</h2>
   <div id="glassControls"></div>
+  <label class="pick">Pattern <select id="pattern"></select></label>
+  <button id="loadPattern">Load pattern SVG…</button>
+  <div id="patternStatus" class="status"></div>
   <label class="pick">Pattern fit
     <select id="fit"><option value="cover">Cover (keep shapes)</option><option value="stretch">Stretch (whole pattern)</option></select>
   </label>
@@ -61,12 +66,13 @@
     <button id="open">Open image</button>
     <button id="save" class="primary" disabled>Download PNG</button>
   </div>
-  <p class="hint">Drop, paste or pick an image. Everything runs in your browser — nothing is uploaded.</p>
+  <p class="hint">Drop, paste or pick an image; drop an .svg to use it as the pattern. Everything runs in your browser — nothing is uploaded.</p>
 </aside>
 <main>
   <div id="drop"><strong>Drop an image here</strong><span>or click to choose · or paste from clipboard</span></div>
   <canvas id="gl"></canvas>
   <input type="file" id="file" accept="image/*" hidden>
+  <input type="file" id="patternFile" accept=".svg,image/svg+xml" hidden>
 </main>
 
 <script id="fs" type="x-shader/x-fragment">
@@ -248,11 +254,17 @@ function buildPatternMap() {
   });
   // Anti-aliased edge pixels have blended colours: give them their neighbour's id.
   const src = ctx.getImageData(0, 0, W, H).data, ids = new Uint8Array(W * H);
-  const n = PATTERN.length + 1;
+  for (let y = 0, i = 0; y < H; y++) for (let x = 0; x < W; x++, i++)
+    ids[i] = keyToId.get(src[i * 4] << 16 | src[i * 4 + 1] << 8 | src[i * 4 + 2]) || (x ? ids[i - 1] : y ? ids[i - W] : 1);
+  return packMap(ids, W, H, PATTERN.length, id => PATTERN[id - 1].slot);
+}
+
+// ids (1..count per pixel, top-down rows) -> RGBA map texture data
+function packMap(ids, W, H, count, slotOf) {
+  const n = count + 1;
   const bx0 = new Float32Array(n).fill(W), by0 = new Float32Array(n).fill(H), bx1 = new Float32Array(n), by1 = new Float32Array(n);
   for (let y = 0, i = 0; y < H; y++) for (let x = 0; x < W; x++, i++) {
-    const id = keyToId.get(src[i * 4] << 16 | src[i * 4 + 1] << 8 | src[i * 4 + 2]) || (x ? ids[i - 1] : y ? ids[i - W] : 1);
-    ids[i] = id;
+    const id = ids[i];
     if (x < bx0[id]) bx0[id] = x; if (x > bx1[id]) bx1[id] = x;
     if (y < by0[id]) by0[id] = y; if (y > by1[id]) by1[id] = y;
   }
@@ -262,10 +274,87 @@ function buildPatternMap() {
     out[o] = id;
     out[o + 1] = Math.round((bx0[id] + bx1[id]) / 2 / W * 255);
     out[o + 2] = Math.round((1 - (by0[id] + by1[id]) / 2 / H) * 255);
-    out[o + 3] = PATTERN[id - 1].slot * 40;
+    out[o + 3] = slotOf(id) * 40;
   }
-  return { data: out, W, H };
+  return { data: out, W, H, aspect: W / H, panes: count };
 }
+
+// =====================================================================================
+// Designer patterns: any SVG works. We ignore fills and colours and look only at the
+// LINES — every outline is drawn as a thin stroke, and each closed region between the
+// lines becomes one pane. So a pattern can be a single <path> of crack lines, or a
+// drawing made of many shapes; both give the same result.
+// =====================================================================================
+const MAX_PANES = 255, MIN_PANE_AREA = 60;
+async function buildSvgPatternMap(text) {
+  const doc = new DOMParser().parseFromString(text, 'image/svg+xml');
+  const svg = doc.documentElement;
+  if (svg.nodeName !== 'svg' || doc.querySelector('parsererror')) throw new Error('Not a valid SVG file');
+  let vb = (svg.getAttribute('viewBox') || '').trim().split(/[\s,]+/).map(Number);
+  if (vb.length !== 4 || vb.some(isNaN)) {
+    vb = [0, 0, parseFloat(svg.getAttribute('width')), parseFloat(svg.getAttribute('height'))];
+    if (!(vb[2] > 0 && vb[3] > 0)) throw new Error('SVG needs a viewBox (or width and height)');
+    svg.setAttribute('viewBox', vb.join(' '));
+  }
+  const W = 2048, H = Math.max(64, Math.min(4096, Math.round(W * vb[3] / vb[2])));
+  svg.setAttribute('width', W); svg.setAttribute('height', H);
+  svg.setAttribute('preserveAspectRatio', 'none');
+  const style = doc.createElementNS('http://www.w3.org/2000/svg', 'style');
+  style.textContent = '*{fill:none!important;stroke:#000!important;stroke-width:2.5px!important;stroke-opacity:1!important;' +
+    'opacity:1!important;stroke-dasharray:none!important;filter:none!important;mask:none!important;clip-path:none!important;' +
+    'vector-effect:non-scaling-stroke!important;visibility:visible!important}';
+  svg.append(style);
+  const url = URL.createObjectURL(new Blob([new XMLSerializer().serializeToString(svg)], { type: 'image/svg+xml' }));
+  const img = new Image();
+  try {
+    await new Promise((res, rej) => { img.onload = res; img.onerror = () => rej(new Error('Could not render this SVG')); img.src = url; });
+  } finally { URL.revokeObjectURL(url); }
+  const cv = document.createElement('canvas');
+  cv.width = W; cv.height = H;
+  const ctx = cv.getContext('2d', { willReadFrequently: true });
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, W, H);
+  ctx.drawImage(img, 0, 0, W, H);
+  const px = ctx.getImageData(0, 0, W, H).data, N = W * H;
+
+  // label connected regions between the lines (flood fill, 4-connected)
+  const label = new Int32Array(N), stack = new Int32Array(N), areas = [0];
+  for (let i = 0; i < N; i++) if (px[i * 4] < 150) label[i] = -1; // on a line
+  for (let start = 0; start < N; start++) {
+    if (label[start] !== 0) continue;
+    const id = areas.length; let top = 0, area = 0;
+    stack[top++] = start; label[start] = id;
+    while (top) {
+      const i = stack[--top], x = i % W; area++;
+      if (x > 0 && label[i - 1] === 0) { label[i - 1] = id; stack[top++] = i - 1; }
+      if (x < W - 1 && label[i + 1] === 0) { label[i + 1] = id; stack[top++] = i + 1; }
+      if (i >= W && label[i - W] === 0) { label[i - W] = id; stack[top++] = i - W; }
+      if (i < N - W && label[i + W] === 0) { label[i + W] = id; stack[top++] = i + W; }
+    }
+    areas.push(area);
+  }
+  // keep the biggest regions (ids must fit in a byte); specks are absorbed by their neighbours
+  const keep = areas.map((a, id) => [a, id]).slice(1).filter(e => e[0] >= MIN_PANE_AREA).sort((p, q) => q[0] - p[0]).slice(0, MAX_PANES);
+  if (keep.length < 2) throw new Error('No closed regions found — the lines need to enclose areas');
+  const remap = new Int32Array(areas.length);
+  keep.forEach(([, id], k) => { remap[id] = k + 1; });
+  const ids = new Uint8Array(N), queue = stack; let qh = 0, qt = 0;
+  for (let i = 0; i < N; i++) { const l = label[i] > 0 ? remap[label[i]] : 0; ids[i] = l; if (l) queue[qt++] = i; }
+  // grow panes over the line pixels (and dropped specks) so every pixel has an owner
+  while (qh < qt) {
+    const i = queue[qh++], x = i % W, id = ids[i];
+    if (x > 0 && !ids[i - 1]) { ids[i - 1] = id; queue[qt++] = i - 1; }
+    if (x < W - 1 && !ids[i + 1]) { ids[i + 1] = id; queue[qt++] = i + 1; }
+    if (i >= W && !ids[i - W]) { ids[i - W] = id; queue[qt++] = i - W; }
+    if (i < N - W && !ids[i + W]) { ids[i + W] = id; queue[qt++] = i + W; }
+  }
+  return packMap(ids, W, H, keep.length, id => (id * 5 + 2) % 6);
+}
+
+// Patterns shipped with the page: add an SVG to patterns/ and list it here.
+const PATTERN_LIBRARY = [
+  { name: 'Portrait 4:5', url: 'patterns/portrait.svg' },
+  { name: 'Facets (example)', url: 'patterns/facets.svg' },
+];
 
 // =====================================================================================
 // Palettes — six colours each, in slot order (dark cool, mid cool, dark warm, mid warm, light, neutral)
@@ -362,7 +451,9 @@ addEventListener('dragleave', e => { if (!e.relatedTarget) document.body.classLi
 addEventListener('drop', e => {
   e.preventDefault();
   document.body.classList.remove('dragging');
-  loadFile([...e.dataTransfer.files].find(f => f.type.startsWith('image/')));
+  const files = [...e.dataTransfer.files], isSvg = f => f.type === 'image/svg+xml' || /\.svg$/i.test(f.name);
+  loadPatternFile(files.find(isSvg));
+  loadFile(files.find(f => f.type.startsWith('image/') && !isSvg(f)));
 });
 addEventListener('paste', e => {
   loadFile([...e.clipboardData.files].find(f => f.type.startsWith('image/')));
@@ -413,10 +504,56 @@ function makeTexture(unit, filter) {
     gl.texParameteri(gl.TEXTURE_2D, k, v);
 }
 makeTexture(1, gl.NEAREST);
-const map = buildPatternMap();
-gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, map.W, map.H, 0, gl.RGBA, gl.UNSIGNED_BYTE, map.data);
 makeTexture(0, gl.LINEAR);
 gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+let map = null; // the pattern in use
+function usePattern(m) {
+  map = m;
+  gl.activeTexture(gl.TEXTURE1);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false); // map rows are already bottom-up
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, m.W, m.H, 0, gl.RGBA, gl.UNSIGNED_BYTE, m.data);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+  gl.activeTexture(gl.TEXTURE0);
+  schedule();
+}
+
+// ---- pattern picker: built-in mural, library files, and SVGs loaded at runtime
+const patterns = { mural: { name: 'Mural', build: async () => buildPatternMap() } };
+PATTERN_LIBRARY.forEach((p, i) => {
+  patterns['lib' + i] = { name: p.name, build: async () => {
+    const r = await fetch(p.url).catch(() => null);
+    if (!r || !r.ok) throw new Error(location.protocol === 'file:' ? 'Library patterns need the page served over http — or use "Load pattern SVG"' : 'Could not load ' + p.url);
+    return buildSvgPatternMap(await r.text());
+  } };
+});
+function patternStatus(msg, error) { $('patternStatus').textContent = msg; $('patternStatus').classList.toggle('error', !!error); }
+async function selectPattern(key) {
+  const p = patterns[key];
+  try {
+    p.map = p.map || await p.build();
+    $('pattern').value = key;
+    patternStatus(p.map.panes + ' panes');
+    usePattern(p.map);
+  } catch (e) {
+    patternStatus(e.message, true);
+    if (map) $('pattern').value = Object.keys(patterns).find(k => patterns[k].map === map);
+  }
+}
+async function loadPatternFile(file) {
+  if (!file) return;
+  try {
+    const m = await buildSvgPatternMap(await file.text());
+    const key = 'file' + Object.keys(patterns).length, name = file.name.replace(/\.svg$/i, '');
+    patterns[key] = { name, map: m };
+    $('pattern').add(new Option(name, key));
+    selectPattern(key);
+  } catch (e) { patternStatus(file.name + ': ' + e.message, true); }
+}
+for (const [key, p] of Object.entries(patterns)) $('pattern').add(new Option(p.name, key));
+$('pattern').addEventListener('change', e => selectPattern(e.target.value));
+$('loadPattern').addEventListener('click', () => $('patternFile').click());
+$('patternFile').addEventListener('change', e => { loadPatternFile(e.target.files[0]); e.target.value = ''; });
+selectPattern(Object.keys(patterns).find(k => patterns[k].name === query.get('pattern')) || 'mural');
 gl.uniform1i(U('uTex'), 0);
 gl.uniform1i(U('uMap'), 1);
 
@@ -440,8 +577,8 @@ function setImage(img) {
 }
 
 function render() {
-  if (!hasImage) return;
-  const aspect = canvas.width / canvas.height, pa = BOUNDS.w / BOUNDS.h;
+  if (!hasImage || !map) return;
+  const aspect = canvas.width / canvas.height, pa = map.aspect;
   // canvas uv -> pattern uv: "cover" keeps the shapes' proportions and crops, "stretch" shows it all
   let fx = 1, fy = 1;
   if ($('fit').value === 'cover') { if (aspect < pa) fx = aspect / pa; else fy = pa / aspect; }
