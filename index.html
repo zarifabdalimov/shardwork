@@ -139,11 +139,21 @@ void main() {
   float t = (h1(id + 5.0) - 0.5) * uTint;
   col = mix(col, vec3(t > 0.0 ? 1.0 : 0.0), abs(t));
 
-  // bevel: bright on one side of a crack, dark on the other
-  vec2 px = vec2(1.2, -1.2) / uRes * max(1.0, uRes.y / 900.0);
+  // bevel: bright on one side of a crack, dark on the other. Several taps at growing distances
+  // (and slightly to either side) are averaged, so the highlight fades in smoothly instead of
+  // switching on per pixel.
   float raw = id / 7.31;
-  if (abs(paneId(vUv + px) - raw) > 0.5) col += uEdge * 0.45;
-  if (abs(paneId(vUv - px) - raw) > 0.5) col -= uEdge * 0.55;
+  vec2 unit = max(1.0, uRes.y / 900.0) / uRes;
+  vec2 along = vec2(0.7071, -0.7071) * unit, side = vec2(0.7071, 0.7071) * unit * 0.6;
+  float lit = 0.0, shade = 0.0;
+  for (int k = 1; k <= 5; k++) {
+    vec2 o = along * float(k) * 0.7, j = side * (mod(float(k), 2.0) * 2.0 - 1.0);
+    float w = 1.2 - float(k) * 0.16; // nearer taps count more
+    lit += w * step(0.5, abs(paneId(vUv + o + j) - raw)) + w * step(0.5, abs(paneId(vUv + o - j) - raw));
+    shade += w * step(0.5, abs(paneId(vUv - o + j) - raw)) + w * step(0.5, abs(paneId(vUv - o - j) - raw));
+  }
+  col += uEdge * 0.45 * smoothstep(0.0, 1.0, lit / 7.2);
+  col -= uEdge * 0.55 * smoothstep(0.0, 1.0, shade / 7.2);
 
   vec2 g = floor(gl_FragCoord.xy / max(1.0, uRes.y / 1100.0));
   float n = fract(sin(dot(g, vec2(12.9898, 78.233)) + uSeed) * 43758.5453) - 0.5;
