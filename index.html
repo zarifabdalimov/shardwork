@@ -11,7 +11,7 @@
   body { background: var(--bg); color: var(--text); font: 14px/1.4 -apple-system, system-ui, "Segoe UI", sans-serif; display: flex; }
   aside { width: 280px; flex: none; background: var(--panel); border-right: 1px solid var(--line); padding: 20px; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; }
   h1 { font-size: 15px; margin: 0 0 4px; letter-spacing: .02em; }
-  h2 { font-size: 11px; margin: 8px 0 0; color: var(--dim); text-transform: uppercase; letter-spacing: .08em; font-weight: 600; }
+  h2 { font-size: 11px; margin: 10px 0 0; padding-top: 14px; border-top: 1px solid var(--line); color: var(--dim); text-transform: uppercase; letter-spacing: .08em; font-weight: 600; }
   label.row { display: grid; grid-template-columns: 1fr auto; gap: 4px 8px; color: var(--dim); font-size: 12px; margin-bottom: 10px; }
   label.row output { color: var(--text); font-variant-numeric: tabular-nums; }
   label.row input[type=range] { grid-column: 1 / -1; width: 100%; accent-color: var(--accent); margin: 0; }
@@ -53,27 +53,32 @@
 <aside>
   <h1>Shardwork</h1>
 
-  <h2>Glass</h2>
-  <div id="glassControls"></div>
-  <div class="pick-label">Pattern</div>
+  <h2>Image</h2>
+  <div id="imageControls"></div>
+  <label class="check"><input type="checkbox" id="mono" checked> Black &amp; white</label>
+  <button id="open">Open image</button>
+
+  <h2>Pattern</h2>
   <div id="patternGrid"></div>
   <button id="loadPattern">Load pattern SVG…</button>
   <div id="patternStatus" class="status"></div>
+  <div id="patternControls"></div>
   <label class="pick">Pattern fit
     <select id="fit"><option value="cover">Cover (keep shapes)</option><option value="stretch">Stretch (whole pattern)</option></select>
   </label>
+
+  <h2>Shards</h2>
+  <div id="shardControls"></div>
+  <button id="shuffle">Shuffle shards</button>
 
   <h2>Color</h2>
   <label class="pick">Palette <select id="palette"></select></label>
   <div id="swatches"></div>
   <div id="colorControls"></div>
-  <label class="check"><input type="checkbox" id="mono" checked> Black &amp; white base image</label>
+  <button id="shuffleColors">Shuffle colors</button>
 
   <div class="buttons">
-    <button id="shuffle">Shuffle shards</button>
-    <button id="shuffleColors">Shuffle colors</button>
-    <button id="reset">Reset sliders</button>
-    <button id="open">Open image</button>
+    <button id="reset" class="wide">Reset sliders</button>
     <button id="save" class="primary" disabled>Download PNG</button>
   </div>
   <p class="hint">Drop, paste or pick an image; drop an .svg to use it as the pattern. Everything runs in your browser — nothing is uploaded.</p>
@@ -93,47 +98,17 @@ uniform sampler2D uTex;  // the user's image
 uniform sampler2D uMap;  // pattern map: R = pane id, GB = pane centre, A = palette slot
 uniform float uAspect;
 uniform vec2 uRes, uFit; // uFit: canvas uv -> pattern uv scale
-uniform float uSeed, uDisp, uZoomVar, uRot, uZoom, uEdge, uGrain, uTint, uMono, uColor, uWarp, uWarpFreq, uShift, uShiftK;
+uniform float uSeed, uDisp, uZoomVar, uRot, uZoom, uEdge, uGrain, uTint, uMono, uColor;
 uniform vec3 uPal[6];
 
 float h1(float n) { return fract(sin(n * 12.9898 + uSeed * 7.233) * 43758.5453); }
-float vhash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
-float vnoise(vec2 p) { // smooth value noise, 0..1
-  vec2 i = floor(p), f = fract(p);
-  f = f * f * (3.0 - 2.0 * f);
-  return mix(mix(vhash(i), vhash(i + vec2(1.0, 0.0)), f.x), mix(vhash(i + vec2(0.0, 1.0)), vhash(i + vec2(1.0, 1.0)), f.x), f.y);
-}
-// bend the pattern itself: push every lookup along a smooth noise field
-vec2 warp(vec2 uv) {
-  if (uWarp <= 0.0) return uv;
-  vec2 q = uv * vec2(uAspect, 1.0) * uWarpFreq + uSeed * 1.7;
-  vec2 n = vec2(vnoise(q), vnoise(q + 37.3)) + 0.5 * vec2(vnoise(q * 2.1 + 11.0), vnoise(q * 2.1 + 71.0));
-  return uv + (n / 1.5 - 0.5) * 2.0 * uWarp * vec2(1.0 / uAspect, 1.0);
-}
-// Size shift: re-space the pattern along x and along y separately. Some columns/rows of panes
-// grow while their neighbours shrink; straight edges stay straight and the pattern still fills the frame.
-float shift1(float x, float ph) {
-  float a = 6.2831853 * uShiftK;
-  return x + uShift * 0.45 / a * (sin(a * x + ph) - sin(ph) + 0.5 * (sin(2.0 * a * x + ph * 1.7) - sin(ph * 1.7)));
-}
-float unshift1(float y, float ph) { // inverse of shift1 (Newton steps; the slope is always > 0)
-  float a = 6.2831853 * uShiftK, x = y;
-  for (int i = 0; i < 5; i++)
-    x -= (shift1(x, ph) - y) / (1.0 + uShift * 0.45 * (cos(a * x + ph) + cos(2.0 * a * x + ph * 1.7)));
-  return x;
-}
-vec2 shiftPhase() { return vec2(uSeed * 3.1, uSeed * 5.3 + 2.0); }
-vec4 pane(vec2 uv) {
-  vec2 p = (warp(uv) - 0.5) * uFit + 0.5, ph = shiftPhase();
-  return texture2D(uMap, vec2(shift1(p.x, ph.x), shift1(p.y, ph.y)));
-}
+vec4 pane(vec2 uv) { return texture2D(uMap, (uv - 0.5) * uFit + 0.5); }
 float paneId(vec2 uv) { return floor(pane(uv).r * 255.0 + 0.5); }
 
 void main() {
   vec4 m = pane(vUv);
   float id = floor(m.r * 255.0 + 0.5) * 7.31;
-  vec2 ph = shiftPhase();
-  vec2 c = (vec2(unshift1(m.g, ph.x), unshift1(m.b, ph.y)) - 0.5) / uFit + 0.5;
+  vec2 c = (m.gb - 0.5) / uFit + 0.5;
 
   // each pane refracts the image with its own shift, magnification and twist
   vec2 off = (vec2(h1(id + 1.0), h1(id + 2.0)) - 0.5) * uDisp * vec2(1.0, 0.6);
@@ -269,9 +244,8 @@ const PATTERN = (() => {
 })();
 
 // Rasterise the pattern into an RGBA map (R = id, G/B = pane centre, A = palette slot).
-function buildPatternMap(opts = {}) {
-  const W = opts.W || 2048, H = Math.round(W * BOUNDS.h / BOUNDS.w);
-  const T = opts.shift ? shiftAxes(opts.shift, BOUNDS.x, BOUNDS.y, BOUNDS.w, BOUNDS.h) : null;
+function buildPatternMap() {
+  const W = 2048, H = Math.round(W * BOUNDS.h / BOUNDS.w);
   const cv = document.createElement('canvas');
   cv.width = W; cv.height = H;
   const ctx = cv.getContext('2d', { willReadFrequently: true });
@@ -283,10 +257,7 @@ function buildPatternMap(opts = {}) {
     ctx.fillStyle = `rgb(${rgb})`;
     for (const part of shape.parts) {
       ctx.save();
-      for (let [kind, ...a] of part) {
-        if (T) a = kind === 'r' ? [T.X(a[0]), T.Y(a[1]), T.X(a[2]), T.Y(a[3])]
-          : kind === 'p' ? [a[0].map((v, k) => k % 2 ? T.Y(v) : T.X(v))]
-          : [T.X(a[0]), T.Y(a[1]), shiftRadius(T, a[0], a[1], a[2])];
+      for (const [kind, ...a] of part) {
         const p = new Path2D();
         if (kind === 'r') p.rect(a[0], a[1], a[2] - a[0], a[3] - a[1]);
         else if (kind === 'p') { const q = a[0]; p.moveTo(q[0], q[1]); for (let k = 2; k < q.length; k += 2) p.lineTo(q[k], q[k + 1]); p.closePath(); }
@@ -301,7 +272,7 @@ function buildPatternMap(opts = {}) {
   const src = ctx.getImageData(0, 0, W, H).data, ids = new Uint8Array(W * H);
   for (let y = 0, i = 0; y < H; y++) for (let x = 0; x < W; x++, i++)
     ids[i] = keyToId.get(src[i * 4] << 16 | src[i * 4 + 1] << 8 | src[i * 4 + 2]) || (x ? ids[i - 1] : y ? ids[i - W] : 1);
-  return Object.assign(packMap(ids, W, H, PATTERN.length, id => PATTERN[id - 1].slot), { shifted: !!T });
+  return packMap(ids, W, H, PATTERN.length, id => PATTERN[id - 1].slot);
 }
 
 // ids (1..count per pixel, top-down rows) -> RGBA map texture data
@@ -325,90 +296,6 @@ function packMap(ids, W, H, count, slotOf) {
 }
 
 // =====================================================================================
-// Size shift: re-space a pattern along x and along y so some panes grow while their
-// neighbours shrink. It is applied to the pattern's GEOMETRY, not its pixels: rectangle
-// edges move, circles get a new centre and radius — so rectangles stay rectangles and
-// circles stay circles.
-// =====================================================================================
-function shiftFn(s, ph) { // monotonic remap of 0..1 onto 0..1
-  const a = 2 * Math.PI * s.k;
-  return u => u + s.amount * 0.45 / a * (Math.sin(a * u + ph) - Math.sin(ph) + 0.5 * (Math.sin(2 * a * u + ph * 1.7) - Math.sin(ph * 1.7)));
-}
-function shiftAxes(s, x0, y0, w, h) {
-  const fx = shiftFn(s, s.phx), fy = shiftFn(s, s.phy);
-  return { X: x => x0 + w * fx((x - x0) / w), Y: y => y0 + h * fy((y - y0) / h) };
-}
-// radius of a circle after the shift: half the average of its shifted width and height
-const shiftRadius = (T, cx, cy, r) => (T.X(cx + r) - T.X(cx - r) + T.Y(cy + r) - T.Y(cy - r)) / 4;
-
-// Path data -> shifted path data. Points are moved; circular arcs stay circular (same sweep angle).
-function shiftPathData(d, T, eps) {
-  const numRe = /[-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][-+]?\d+)?/y;
-  let i = 0, cmd = '', cx = 0, cy = 0, sx = 0, sy = 0, cur = null;
-  const ws = () => { while (i < d.length && (d[i] === ',' || d.charCodeAt(i) <= 32)) i++; };
-  const n = () => { ws(); numRe.lastIndex = i; const m = numRe.exec(d); if (!m) throw new Error('bad path'); i = numRe.lastIndex; return +m[0]; };
-  const flag = () => { ws(); return d[i++] === '1' ? 1 : 0; };
-  const subs = [];
-  for (;;) {
-    ws(); if (i >= d.length) break;
-    if (/[a-zA-Z]/.test(d[i])) cmd = d[i++];
-    else if (cmd === 'M') cmd = 'L'; else if (cmd === 'm') cmd = 'l';
-    else if (!cmd || cmd === 'Z' || cmd === 'z') throw new Error('bad path');
-    const C = cmd.toUpperCase(), ox = cmd !== C ? cx : 0, oy = cmd !== C ? cy : 0;
-    if (C === 'Z') { if (cur) cur.closed = true; cx = sx; cy = sy; continue; }
-    if (C === 'M') { cx = sx = n() + ox; cy = sy = n() + oy; cur = { start: [T.X(cx), T.Y(cy)], segs: [], closed: false }; subs.push(cur); continue; }
-    if (!cur) throw new Error('bad path');
-    let x, y, k = C, a = [];
-    const pair = () => { const px = n() + ox, py = n() + oy; a.push(T.X(px), T.Y(py)); };
-    if (C === 'L' || C === 'T') { x = n() + ox; y = n() + oy; }
-    else if (C === 'H') { x = n() + ox; y = cy; k = 'L'; }
-    else if (C === 'V') { y = n() + oy; x = cx; k = 'L'; }
-    else if (C === 'C') { pair(); pair(); x = n() + ox; y = n() + oy; }
-    else if (C === 'S' || C === 'Q') { pair(); x = n() + ox; y = n() + oy; }
-    else if (C === 'A') {
-      const rx = Math.abs(n()), ry = Math.abs(n()), rot = n(), la = flag(), sw = flag();
-      x = n() + ox; y = n() + oy;
-      const chord = Math.hypot(x - cx, y - cy), chord2 = Math.hypot(T.X(x) - T.X(cx), T.Y(y) - T.Y(cy));
-      if (Math.abs(rx - ry) <= 1e-6 * Math.max(1, rx) && chord > 0) { const r = rx * chord2 / chord; a = [r, r, 0, la, sw]; }
-      else { const mx = (x + cx) / 2, my = (y + cy) / 2; a = [(T.X(mx + rx) - T.X(mx - rx)) / 2, (T.Y(my + ry) - T.Y(my - ry)) / 2, rot, la, sw]; }
-    } else throw new Error('bad path');
-    cur.segs.push({ k, a, end: [T.X(x), T.Y(y)] });
-    cx = x; cy = y;
-  }
-  const f = v => +v.toFixed(2);
-  return subs.map(sub => {
-    const g = sub.segs, last = g[g.length - 1];
-    if (eps > 0 && !sub.closed && g.length) { // let loose line ends overshoot a little so they still reach the line they met
-      const push = (p, from) => { const l = Math.hypot(p[0] - from[0], p[1] - from[1]); if (l > 0) { p[0] += (p[0] - from[0]) / l * eps; p[1] += (p[1] - from[1]) / l * eps; } };
-      const s0 = sub.start.slice(), before = g.length > 1 ? g[g.length - 2].end.slice() : s0;
-      if (g[0].k === 'L') push(sub.start, g[0].end.slice());
-      if (last.k === 'L') push(last.end, before);
-    }
-    return 'M' + sub.start.map(f) + g.map(s => s.k + [...s.a, ...s.end].map(f)).join('') + (sub.closed ? 'Z' : '');
-  }).join('');
-}
-
-// Shift every shape of an SVG in place. Returns false (and changes nothing) if the file uses features we can't shift.
-function shiftSvgGeometry(svg, els, vb, s, eps) {
-  if (svg.querySelector('[transform], use')) return false;
-  const T = shiftAxes(s, vb[0], vb[1], vb[2], vb[3]), todo = [];
-  const num = (el, a) => parseFloat(el.getAttribute(a)) || 0;
-  try {
-    for (const el of els) {
-      const t = el.localName;
-      if (t === 'path') todo.push([el, { d: shiftPathData(el.getAttribute('d') || '', T, eps) }]);
-      else if (t === 'rect') { const x = num(el, 'x'), y = num(el, 'y'); todo.push([el, { x: T.X(x), y: T.Y(y), width: T.X(x + num(el, 'width')) - T.X(x), height: T.Y(y + num(el, 'height')) - T.Y(y) }]); }
-      else if (t === 'circle') { const x = num(el, 'cx'), y = num(el, 'cy'); todo.push([el, { cx: T.X(x), cy: T.Y(y), r: shiftRadius(T, x, y, num(el, 'r')) }]); }
-      else if (t === 'ellipse') { const x = num(el, 'cx'), y = num(el, 'cy'), rx = num(el, 'rx'), ry = num(el, 'ry'); todo.push([el, { cx: T.X(x), cy: T.Y(y), rx: (T.X(x + rx) - T.X(x - rx)) / 2, ry: (T.Y(y + ry) - T.Y(y - ry)) / 2 }]); }
-      else if (t === 'line') todo.push([el, { x1: T.X(num(el, 'x1')), y1: T.Y(num(el, 'y1')), x2: T.X(num(el, 'x2')), y2: T.Y(num(el, 'y2')) }]);
-      else { const q = (el.getAttribute('points') || '').trim().split(/[\s,]+/).map(Number); if (q.some(isNaN)) return false; todo.push([el, { points: q.map((v, k) => k % 2 ? T.Y(v) : T.X(v)).join(' ') }]); }
-    }
-  } catch (e) { return false; }
-  for (const [el, attrs] of todo) for (const k in attrs) el.setAttribute(k, attrs[k]);
-  return true;
-}
-
-// =====================================================================================
 // Designer patterns: any SVG works, read in one of two ways.
 //  · Filled artwork (shapes with fills, stacked on top of each other): each visible piece
 //    of each shape is a pane, exactly as the drawing looks. Shapes that share a fill share
@@ -425,7 +312,7 @@ function fillOf(el) { // nearest fill on the element or its ancestors; SVG's def
   }
   return 'black';
 }
-async function buildSvgPatternMap(text, opts = {}) {
+async function buildSvgPatternMap(text) {
   const doc = new DOMParser().parseFromString(text, 'image/svg+xml');
   const svg = doc.documentElement;
   if (svg.nodeName !== 'svg' || doc.querySelector('parsererror')) throw new Error('Not a valid SVG file');
@@ -435,13 +322,12 @@ async function buildSvgPatternMap(text, opts = {}) {
     if (!(vb[2] > 0 && vb[3] > 0)) throw new Error('SVG needs a viewBox (or width and height)');
     svg.setAttribute('viewBox', vb.join(' '));
   }
-  const W = opts.W || 2048, H = Math.max(64, Math.min(4096, Math.round(W * vb[3] / vb[2])));
+  const W = 2048, H = Math.max(64, Math.min(4096, Math.round(W * vb[3] / vb[2])));
   const els = [...svg.querySelectorAll(GEOMETRY)].filter(e => !e.closest('defs,clipPath,mask,pattern,symbol,marker'));
   const fills = els.map(fillOf), fillMode = fills.some(f => f !== 'none');
-  const shifted = !!opts.shift && shiftSvgGeometry(svg, els, vb, opts.shift, fillMode ? 0 : 0.012 * Math.max(vb[2], vb[3]) * opts.shift.amount);
 
   // restyle: flat unique colour per filled shape (or thin black strokes), nothing else
-  const stroke = `fill:none!important;stroke:#000!important;stroke-width:${Math.max(1.5, 2.5 * W / 2048)}px!important;stroke-opacity:1!important;stroke-dasharray:none!important;vector-effect:non-scaling-stroke!important`;
+  const stroke = `fill:none!important;stroke:#000!important;stroke-width:2.5px!important;stroke-opacity:1!important;stroke-dasharray:none!important;vector-effect:non-scaling-stroke!important`;
   const keyToClass = new Map([[0xffffff, 0]]), classSlot = [0], slotOfFill = new Map();
   els.forEach((el, i) => {
     if (!fillMode || fills[i] === 'none') { el.setAttribute('style', stroke); return; }
@@ -492,8 +378,7 @@ async function buildSvgPatternMap(text, opts = {}) {
     areas.push(area); regionClass.push(c);
   }
   // keep the biggest regions (ids must fit in a byte); specks are absorbed by their neighbours
-  const minArea = MIN_PANE_AREA * (W / 2048) ** 2;
-  const keep = areas.map((a, id) => [a, id]).slice(1).filter(e => e[0] >= minArea).sort((p, q) => q[0] - p[0]).slice(0, MAX_PANES);
+  const keep = areas.map((a, id) => [a, id]).slice(1).filter(e => e[0] >= MIN_PANE_AREA).sort((p, q) => q[0] - p[0]).slice(0, MAX_PANES);
   if (keep.length < 2) throw new Error('No separate regions found — the shapes or lines need to enclose areas');
   const remap = new Int32Array(areas.length), slots = [0];
   keep.forEach(([, id], k) => { remap[id] = k + 1; slots.push(fillMode ? classSlot[regionClass[id]] : ((k + 1) * 5 + 2) % 6); });
@@ -507,7 +392,7 @@ async function buildSvgPatternMap(text, opts = {}) {
     if (i >= W && !ids[i - W]) { ids[i - W] = id; queue[qt++] = i - W; }
     if (i < N - W && !ids[i + W]) { ids[i + W] = id; queue[qt++] = i + W; }
   }
-  return Object.assign(packMap(ids, W, H, keep.length, id => slots[id]), { shifted });
+  return packMap(ids, W, H, keep.length, id => slots[id]);
 }
 
 // Patterns shipped with the page (copies of the files in patterns/), embedded so they work even when the
@@ -539,21 +424,22 @@ const PALETTES = {
   'Neon':    ['#0b0f3b', '#00c2ff', '#5a00d6', '#ff2e93', '#e9ff4d', '#2af5b0'],
 };
 
-const GLASS = [ // id, label, min, max, step, default
+// Sliders, grouped as in the sidebar: id, label, min, max, step, default
+const IMAGE_SLIDERS = [
+  ['zoom',     'Image zoom',      0.6, 3, 0.01, 1.4],
+  ['grain',    'Grain',           0, 0.6, 0.01, 0.22],
+];
+const PATTERN_SLIDERS = [
   ['patScale', 'Pattern scale',   1, 3, 0.01, 1],
-  ['shift',    'Size shift',      0, 1, 0.01, 0],
-  ['shiftK',   'Shift detail',    1, 4, 1, 2],
-  ['warp',     'Organic warp',    0, 0.25, 0.005, 0],
-  ['warpFreq', 'Warp detail',     0.5, 8, 0.1, 2],
+];
+const SHARD_SLIDERS = [
   ['disp',     'Displacement',    0, 0.6, 0.005, 0.22],
   ['zoomVar',  'Magnification',   0, 1.2, 0.01, 0.5],
   ['rot',      'Twist',           0, 0.6, 0.005, 0.06],
-  ['zoom',     'Image zoom',      0.6, 3, 0.01, 1.4],
   ['edge',     'Edge highlights', 0, 1, 0.01, 0.5],
   ['tint',     'Glass tint',      0, 0.5, 0.01, 0.14],
-  ['grain',    'Grain',           0, 0.6, 0.01, 0.22],
 ];
-const COLOR = [['color', 'Color strength', 0, 1, 0.01, 0.85]];
+const COLOR_SLIDERS = [['color', 'Color strength', 0, 1, 0.01, 0.85]];
 const MAX_SIDE = 2400;
 const $ = id => document.getElementById(id);
 const query = new URLSearchParams(location.search); // any control can be preset, e.g. ?palette=Mural&disp=0.1
@@ -573,15 +459,15 @@ function addSliders(list, host) {
       params[id] = +e.target.value;
       row.querySelector('output').textContent = e.target.value;
       schedule();
-      if (id === 'shift' || id === 'shiftK') refreshPattern(false);
     });
-    if (id === 'shift' || id === 'shiftK') row.querySelector('input').addEventListener('change', () => refreshPattern(true));
     sliders.push(row.querySelector('input'));
     host.append(row);
   }
 }
-addSliders(GLASS, $('glassControls'));
-addSliders(COLOR, $('colorControls'));
+addSliders(IMAGE_SLIDERS, $('imageControls'));
+addSliders(PATTERN_SLIDERS, $('patternControls'));
+addSliders(SHARD_SLIDERS, $('shardControls'));
+addSliders(COLOR_SLIDERS, $('colorControls'));
 for (const name of Object.keys(PALETTES)) $('palette').add(new Option(name, name));
 $('palette').value = PALETTES[query.get('palette')] !== undefined ? query.get('palette') : 'None (original)';
 if (query.has('fit')) $('fit').value = query.get('fit');
@@ -597,7 +483,7 @@ updateSwatches();
 $('palette').addEventListener('change', () => { updateSwatches(); schedule(); });
 $('fit').addEventListener('change', schedule);
 $('mono').addEventListener('change', schedule);
-$('shuffle').addEventListener('click', () => { seed = 1 + Math.floor(Math.random() * 1e6); schedule(); refreshPattern(true); });
+$('shuffle').addEventListener('click', () => { seed = 1 + Math.floor(Math.random() * 1e6); schedule(); });
 $('shuffleColors').addEventListener('click', () => {
   for (let i = 5; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [colorOrder[i], colorOrder[j]] = [colorOrder[j], colorOrder[i]]; }
   updateSwatches(); schedule();
@@ -605,7 +491,6 @@ $('shuffleColors').addEventListener('click', () => {
 $('reset').addEventListener('click', () => {
   // zero everything; the two zoom sliders can't reach 0, so they go to their neutral 1
   for (const el of sliders) { el.value = +el.min > 0 ? 1 : 0; el.dispatchEvent(new Event('input')); }
-  refreshPattern(true);
 });
 $('open').addEventListener('click', () => $('file').click());
 $('drop').addEventListener('click', () => $('file').click());
@@ -694,9 +579,8 @@ function usePattern(m) {
 }
 
 // ---- pattern picker: built-in mural, library patterns, and SVGs loaded at runtime
-const patterns = { mural: { name: 'Mural', build: async opts => buildPatternMap(opts) } };
-PATTERN_LIBRARY.forEach((p, i) => { patterns['lib' + i] = { name: p.name, build: opts => buildSvgPatternMap(p.svg, opts) }; });
-let currentKey = null;
+const patterns = { mural: { name: 'Mural', build: async () => buildPatternMap() } };
+PATTERN_LIBRARY.forEach((p, i) => { patterns['lib' + i] = { name: p.name, build: () => buildSvgPatternMap(p.svg) }; });
 function patternStatus(msg, error) { $('patternStatus').textContent = msg; $('patternStatus').classList.toggle('error', !!error); }
 
 // Small preview of a pattern map: panes in grey shades, cracks as light lines.
@@ -732,39 +616,17 @@ async function selectPattern(key) {
   const p = patterns[key];
   try {
     p.map = p.map || await (p.building = p.building || p.build());
-    currentKey = key;
     for (const q of Object.values(patterns)) q.tile.classList.toggle('active', q === p);
     patternStatus(p.name + ' · ' + p.map.panes + ' panes');
-    refreshPattern(true);
+    usePattern(p.map);
   } catch (e) { patternStatus(e.message, true); }
-}
-// Size shift rebuilds the pattern from its geometry. While a slider is dragged we build a
-// half-resolution preview; the full-resolution one follows when it is released.
-function shiftSpec() {
-  const u = (seed % 1000) / 10;
-  return params.shift > 0 ? { amount: params.shift, k: params.shiftK, phx: u * 3.1, phy: u * 5.3 + 2 } : null;
-}
-let shiftBusy = false, shiftQueued = null;
-async function refreshPattern(final) {
-  const p = patterns[currentKey];
-  if (!p || !p.map) return;
-  if (shiftBusy) { shiftQueued = { final: final || !!(shiftQueued && shiftQueued.final) }; return; }
-  const spec = shiftSpec();
-  if (!spec) { usePattern(p.map); return; }
-  shiftBusy = true;
-  try {
-    const m = await p.build({ shift: spec, W: final ? 2048 : 1024 });
-    if (patterns[currentKey] === p) usePattern(m);
-  } catch (e) { patternStatus(e.message, true); }
-  shiftBusy = false;
-  if (shiftQueued) { const q = shiftQueued; shiftQueued = null; refreshPattern(q.final); }
 }
 async function loadPatternFile(file) {
   if (!file) return;
   try {
-    const text = await file.text(), m = await buildSvgPatternMap(text);
+    const m = await buildSvgPatternMap(await file.text());
     const key = 'file' + Object.keys(patterns).length, name = file.name.replace(/\.svg$/i, '');
-    patterns[key] = { name, map: m, build: opts => buildSvgPatternMap(text, opts) };
+    patterns[key] = { name, map: m };
     addPatternTile(key);
     selectPattern(key);
   } catch (e) { patternStatus(file.name + ': ' + e.message, true); }
@@ -805,9 +667,8 @@ function render() {
   gl.uniform2f(U('uRes'), canvas.width, canvas.height);
   gl.uniform1f(U('uAspect'), aspect);
   gl.uniform1f(U('uSeed'), (seed % 1000) / 10);
-  for (const k of ['shift', 'shiftK', 'warp', 'warpFreq', 'disp', 'zoomVar', 'rot', 'zoom', 'edge', 'tint', 'grain'])
+  for (const k of ['disp', 'zoomVar', 'rot', 'zoom', 'edge', 'tint', 'grain'])
     gl.uniform1f(U('u' + k[0].toUpperCase() + k.slice(1)), params[k]);
-  gl.uniform1f(U('uShift'), map.shifted ? 0 : params.shift); // already baked into the map when shifted
   gl.uniform1f(U('uMono'), $('mono').checked ? 1 : 0);
   const pal = currentPalette();
   gl.uniform1f(U('uColor'), pal ? params.color : 0);
